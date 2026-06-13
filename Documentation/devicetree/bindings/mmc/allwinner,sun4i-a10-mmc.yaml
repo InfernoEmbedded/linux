@@ -58,6 +58,9 @@ properties:
       - items:
           - const: allwinner,sun55i-a523-mmc
           - const: allwinner,sun20i-d1-mmc
+      - items:
+          - const: allwinner,sun60i-a733-mmc
+          - const: allwinner,sun20i-d1-mmc
 
   reg:
     maxItems: 1
