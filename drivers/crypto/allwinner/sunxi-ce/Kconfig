@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config CRYPTO_DEV_SUNXI_CE
+	tristate "Allwinner Crypto Engine (CE V5) accelerator"
+	depends on ARCH_SUNXI || COMPILE_TEST
+	select CRYPTO_SKCIPHER
+	select CRYPTO_HASH
+	select CRYPTO_ENGINE
+	select HW_RANDOM
+	default m
+	help
+	  Driver for Allwinner Crypto Engine (CE V5 architecture) found on
+	  Allwinner A733 / sun60iw2 and A523 / sun55i SoCs.
+	  Supports hardware acceleration for AES (CBC, ECB, CTR, CTS, XTS,
+	  OFB, CFB, GCM), DES, 3DES, MD5, SHA-1, SHA-224, SHA-256, SHA-384,
+	  SHA-512, HMAC, PRNG, and True Random Number Generator (TRNG) exposed
+	  via /dev/hwrng.
