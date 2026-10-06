@@ -439,6 +439,21 @@
 	};
 };
 
+&combophy {
+       resets = <&ccu RST_BUS_PCIE_USB3>;
+    	phy_use_sel = <0>;
+	status = "okay";
+};
+
+&pcie {
+	reset-gpios = <&pio 7 11 GPIO_ACTIVE_HIGH>;
+	wake-gpios = <&pio 7 12 GPIO_ACTIVE_HIGH>;
+	num-lanes = <2>;
+	clk-freq-100M;
+	pcie3v3-supply = <&reg_pcie_vcc3v3>;
+	status = "okay";
+};
+
 &usb_otg {
 	/*
 	 * The OTG controller is connected to one of the type-A ports.

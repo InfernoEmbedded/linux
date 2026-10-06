@@ -208,7 +208,7 @@ static int brcmf_c_process_txcap_blob(struct brcmf_if *ifp)
 
 	err = brcmf_bus_get_blob(bus, &fw, BRCMF_BLOB_TXCAP);
 	if (err || !fw) {
-		brcmf_info("no txcap_blob available (err=%d)\n", err);
+		brcmf_dbg(INFO, "no txcap_blob available (err=%d)\n", err);
 		return 0;
 	}
 
@@ -372,7 +372,7 @@ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
 	strsep(&ptr, "\n");
 
 	/* Print fw version info */
-	brcmf_info("Firmware: %s %s\n", ri->chipname, buf);
+	brcmf_dbg(INFO, "Firmware: %s %s\n", ri->chipname, buf);
 
 	/* locate firmware version number for ethtool */
 	ptr = strrchr(buf, ' ');

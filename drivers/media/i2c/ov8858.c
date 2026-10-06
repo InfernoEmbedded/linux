@@ -60,13 +60,10 @@
 #define OV8858_LONG_GAIN_DEFAULT	0x80
 
 #define OV8858_REG_LONG_DIGIGAIN	OV8858_REG_16BIT(0x350a)
-#define OV8858_LONG_DIGIGAIN_H_MASK	0x3fc0
-#define OV8858_LONG_DIGIGAIN_L_MASK	0x3f
-#define OV8858_LONG_DIGIGAIN_H_SHIFT	2
 #define OV8858_LONG_DIGIGAIN_MIN	0x0
-#define OV8858_LONG_DIGIGAIN_MAX	0x3fff
+#define OV8858_LONG_DIGIGAIN_MAX	0xfff
 #define OV8858_LONG_DIGIGAIN_STEP	1
-#define OV8858_LONG_DIGIGAIN_DEFAULT	0x200
+#define OV8858_LONG_DIGIGAIN_DEFAULT	0x400
 
 #define OV8858_REG_VTS			OV8858_REG_16BIT(0x380e)
 #define OV8858_VTS_MAX			0x7fff
@@ -1531,7 +1528,6 @@ static int ov8858_set_ctrl(struct v4l2_ctrl *ctrl)
 	struct i2c_client *client = v4l2_get_subdevdata(&ov8858->subdev);
 	struct v4l2_mbus_framefmt *format;
 	struct v4l2_subdev_state *state;
-	u16 digi_gain;
 	s64 max_exp;
 	int ret;
 
@@ -1571,16 +1567,11 @@ static int ov8858_set_ctrl(struct v4l2_ctrl *ctrl)
 		break;
 	case V4L2_CID_DIGITAL_GAIN:
 		/*
-		 * Digital gain is assembled as:
-		 * 0x350a[7:0] = dgain[13:6]
-		 * 0x350b[5:0] = dgain[5:0]
-		 * Reassemble the control value to write it in one go.
+		 * Q4.10 across 0x350a[3:0]/0x350b[7:0], 0x400 = 1x. The
+		 * sensor ignores writes to 0x350a above bit 3.
 		 */
-		digi_gain = (ctrl->val & OV8858_LONG_DIGIGAIN_L_MASK)
-			  | ((ctrl->val & OV8858_LONG_DIGIGAIN_H_MASK) <<
-			      OV8858_LONG_DIGIGAIN_H_SHIFT);
 		ret = ov8858_write(ov8858, OV8858_REG_LONG_DIGIGAIN,
-				   digi_gain, NULL);
+				   ctrl->val, NULL);
 		break;
 	case V4L2_CID_VBLANK:
 		ret = ov8858_write(ov8858, OV8858_REG_VTS,

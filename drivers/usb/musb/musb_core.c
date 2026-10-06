@@ -976,6 +976,16 @@ static void musb_handle_intr_disconnect(struct musb *musb, u8 devctl)
 	case OTG_STATE_B_IDLE:
 		musb_g_disconnect(musb);
 		break;
+	case OTG_STATE_A_WAIT_VRISE:
+		/*
+		 * For sunxi use case, where host side of the musb driver
+		 * is not used for host mode, we want to ignore
+		 * OTG_STATE_A_WAIT_VRISE state set in sunxi glue code
+		 * when transitioning to host mode on disconnect, in
+		 * order to not confuse the dmesg reader about possible
+		 * issues.
+		 */
+		break;
 	default:
 		WARNING("unhandled DISCONNECT transition (%s)\n",
 			musb_otg_state_string(musb));
@@ -1802,7 +1812,7 @@ void musb_dma_completion(struct musb *musb, u8 epnum, u8 transmit)
 	/* called with controller lock already held */
 
 	if (!epnum) {
-		if (!is_cppi_enabled(musb)) {
+		if (!musb_dma_queue_autoadvance(musb)) {
 			/* endpoint 0 */
 			if (is_host_active(musb))
 				musb_h_ep0_irq(musb);

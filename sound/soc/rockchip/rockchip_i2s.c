@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/mfd/syscon.h>
 #include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/clk.h>
 #include <linux/pinctrl/consumer.h>
@@ -57,6 +58,15 @@ struct rk_i2s_dev {
 	struct pinctrl *pinctrl;
 	struct pinctrl_state *bclk_on;
 	struct pinctrl_state *bclk_off;
+/*
+ * pinctrl_select_state() takes mutexes, so the BCLK pad is switched from
+ * hw_params/hw_free rather than from the atomic trigger op.  The pad is
+ * routed to the controller while either direction has hw set up; BCLK
+ * only actually toggles while I2S_XFER is enabled, which the trigger op
+ * still controls.
+ */
+	struct mutex bclk_lock; /* bclk_used and the pad state */
+	bool bclk_used[2];	/* indexed by SNDRV_PCM_STREAM_* */
 };
 
 static int i2s_pinctrl_select_bclk_on(struct rk_i2s_dev *i2s)
@@ -113,6 +123,13 @@ static int i2s_runtime_resume(struct device *dev)
 	ret = regcache_sync(i2s->regmap);
 	if (ret)
 		clk_disable_unprepare(i2s->mclk);
+
+	if (ret == 0) {
+		unsigned long rate = clk_get_rate(i2s->mclk);
+
+		clk_set_rate(i2s->mclk, rate - 1);
+		clk_set_rate(i2s->mclk, rate);
+	}
 
 	return ret;
 }
@@ -354,6 +371,7 @@ static int rockchip_i2s_hw_params(struct snd_pcm_substream *substream,
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	unsigned int val = 0;
 	unsigned int mclk_rate, bclk_rate, div_bclk, div_lrck;
+	int ret;
 
 	if (i2s->is_master_mode) {
 		mclk_rate = clk_get_rate(i2s->mclk);
@@ -458,6 +476,27 @@ static int rockchip_i2s_hw_params(struct snd_pcm_substream *substream,
 	regmap_update_bits(i2s->regmap, I2S_CKR,
 			   I2S_CKR_TRCM_MASK,
 			   val);
+
+	mutex_lock(&i2s->bclk_lock);
+	i2s->bclk_used[substream->stream] = true;
+	ret = i2s_pinctrl_select_bclk_on(i2s);
+	mutex_unlock(&i2s->bclk_lock);
+
+	return ret;
+}
+
+static int rockchip_i2s_hw_free(struct snd_pcm_substream *substream,
+				struct snd_soc_dai *dai)
+{
+	struct rk_i2s_dev *i2s = to_info(dai);
+
+	mutex_lock(&i2s->bclk_lock);
+	i2s->bclk_used[substream->stream] = false;
+	if (!i2s->bclk_used[SNDRV_PCM_STREAM_PLAYBACK] &&
+	    !i2s->bclk_used[SNDRV_PCM_STREAM_CAPTURE])
+		i2s_pinctrl_select_bclk_off(i2s);
+	mutex_unlock(&i2s->bclk_lock);
+
 	return 0;
 }
 
@@ -475,22 +514,14 @@ static int rockchip_i2s_trigger(struct snd_pcm_substream *substream,
 			ret = rockchip_snd_rxctrl(i2s, 1);
 		else
 			ret = rockchip_snd_txctrl(i2s, 1);
-		if (ret < 0)
-			return ret;
-		i2s_pinctrl_select_bclk_on(i2s);
 		break;
 	case SNDRV_PCM_TRIGGER_SUSPEND:
 	case SNDRV_PCM_TRIGGER_STOP:
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
-			if (!i2s->tx_start)
-				i2s_pinctrl_select_bclk_off(i2s);
+		if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
 			ret = rockchip_snd_rxctrl(i2s, 0);
-		} else {
-			if (!i2s->rx_start)
-				i2s_pinctrl_select_bclk_off(i2s);
+		else
 			ret = rockchip_snd_txctrl(i2s, 0);
-		}
 		break;
 	default:
 		ret = -EINVAL;
@@ -540,6 +571,7 @@ static int rockchip_i2s_dai_probe(struct snd_soc_dai *dai)
 static const struct snd_soc_dai_ops rockchip_i2s_dai_ops = {
 	.probe = rockchip_i2s_dai_probe,
 	.hw_params = rockchip_i2s_hw_params,
+	.hw_free = rockchip_i2s_hw_free,
 	.set_bclk_ratio	= rockchip_i2s_set_bclk_ratio,
 	.set_sysclk = rockchip_i2s_set_sysclk,
 	.set_fmt = rockchip_i2s_set_fmt,
@@ -623,6 +655,7 @@ static const struct reg_default rockchip_i2s_reg_defaults[] = {
 	{0x08, 0x00071f1f},
 	{0x10, 0x001f0000},
 	{0x14, 0x01f00000},
+	{0x1c, 0x00000000},
 };
 
 static const struct regmap_config rockchip_i2s_regmap_config = {
@@ -755,6 +788,7 @@ static int rockchip_i2s_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	spin_lock_init(&i2s->lock);
+	mutex_init(&i2s->bclk_lock);
 	i2s->dev = &pdev->dev;
 
 	i2s->grf = syscon_regmap_lookup_by_phandle(node, "rockchip,grf");

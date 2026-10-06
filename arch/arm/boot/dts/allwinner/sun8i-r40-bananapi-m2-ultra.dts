@@ -118,7 +118,21 @@
 	cpu-supply = <&reg_dcdc2>;
 };
 
+&codec {
+	allwinner,audio-routing =
+		"Headphone", "HP",
+		"Headphone", "HPCOM",
+		"MIC1", "Mic",
+		"Mic", "MBIAS";
+	allwinner,codec-analog-controls = <&codec_analog>;
+	status = "okay";
+};
+
 &de {
+	status = "okay";
+};
+
+&ehci0 {
 	status = "okay";
 };
 
@@ -164,10 +178,15 @@
 		reg = <0x34>;
 		interrupt-parent = <&nmi_intc>;
 		interrupts = <0 IRQ_TYPE_LEVEL_LOW>;
+		x-powers,drive-vbus-en;
 	};
 };
 
 #include "axp22x.dtsi"
+
+&i2s2 {
+	status = "okay";
+};
 
 &ir0 {
 	status = "okay";
@@ -196,6 +215,10 @@
 	vqmmc-supply = <&reg_dcdc1>;
 	bus-width = <8>;
 	non-removable;
+	status = "okay";
+};
+
+&ohci0 {
 	status = "okay";
 };
 
@@ -298,10 +321,18 @@
 	regulator-name = "vdd2v5-sata";
 };
 
+&reg_drivevbus {
+	status = "okay";
+};
+
 &reg_eldo3 {
 	regulator-min-microvolt = <1200000>;
 	regulator-max-microvolt = <1200000>;
 	regulator-name = "vdd1v2-sata";
+};
+
+&sound_hdmi {
+	status = "okay";
 };
 
 &tcon_tv0 {
@@ -334,6 +365,7 @@
 };
 
 &usbphy {
+	usb0_vbus-supply = <&reg_drivevbus>;
 	usb1_vbus-supply = <&reg_vcc5v0>;
 	usb2_vbus-supply = <&reg_vcc5v0>;
 	status = "okay";

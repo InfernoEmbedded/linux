@@ -10,6 +10,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/unaligned.h>
 
+#include <media/mipi-csi2.h>
 #include <media/v4l2-cci.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -99,6 +100,14 @@
 #define IMX258_REG_SCALE_MODE                     CCI_REG8(0x0401)
 #define IMX258_REG_SCALE_MODE_EXT                 CCI_REG8(0x3038)
 #define IMX258_REG_AF_WINDOW_MODE                 CCI_REG8(0x7bcd)
+#define IMX258_AF_WINDOW_MODE_AUTO                0
+#define IMX258_AF_WINDOW_MODE_MANUAL              1
+#define IMX258_REG_AF_WINDOW_X_STA                CCI_REG16(0x3170)
+#define IMX258_REG_AF_WINDOW_X_END                CCI_REG16(0x3172)
+#define IMX258_REG_AF_WINDOW_Y_STA                CCI_REG16(0x3174)
+#define IMX258_REG_AF_WINDOW_Y_END                CCI_REG16(0x3176)
+#define IMX258_PDPIX_DATA_RATE_RAW10              0
+#define IMX258_PDPIX_DATA_RATE_BYTE2              1
 #define IMX258_REG_FRM_LENGTH_CTL                 CCI_REG8(0x0350)
 #define IMX258_REG_CSI_LANE_MODE                  CCI_REG8(0x0114)
 #define IMX258_REG_X_EVN_INC                      CCI_REG8(0x0381)
@@ -129,6 +138,32 @@
 #define IMX258_REG_PLL_IOP_MPY                    CCI_REG16(0x030e)
 #define IMX258_REG_REQ_LINK_BIT_RATE_MBPS_H       CCI_REG16(0x0820)
 #define IMX258_REG_REQ_LINK_BIT_RATE_MBPS_L       CCI_REG16(0x0822)
+
+/*
+ * Shield-pixel (PDAF) output. The pixels sit in a 96 x 130 grid of blocks
+ * across the pixel array and their samples are emitted as extra CSI-2 long
+ * packets with a fixed, non-programmable data type, during line blanking.
+ * The geometry constants besides the block grid were measured on hardware,
+ * the documentation does not state them: ~384 sample columns across the
+ * full array width, 80 16-bit samples per packet (the BYTE2 format), one
+ * PD packet line per ~7 pixel rows inside the AF window counting the empty
+ * packets interleaved with the data ones, and 164 bytes per packet as
+ * framed in the RK3399 ISP FIFO (4-byte MIPI packet header plus the
+ * 160-byte payload).
+ */
+#define IMX258_CSI2_DT_PDAF                       0x2f
+#define IMX258_PD_BLOCKS_H                        96
+#define IMX258_PD_BLOCKS_V                        130
+#define IMX258_PD_COLS                            384
+#define IMX258_PD_SAMPLES_PER_PKT                 80
+#define IMX258_PD_PKT_BYTES                       164
+#define IMX258_PD_LINE_PITCH                      7
+
+enum {
+	IMX258_PAD_IMAGE,
+	IMX258_PAD_PDAF,
+	IMX258_PAD_NUM,
+};
 
 struct imx258_reg_list {
 	u32 num_of_regs;
@@ -172,6 +207,9 @@ struct imx258_mode {
 
 	/* Analog crop rectangle */
 	struct v4l2_rect crop;
+
+	/* Shield-pixel output is possible (full-pixel readout only) */
+	bool has_pdaf;
 };
 
 /*
@@ -213,12 +251,12 @@ static const struct cci_reg_sequence mipi_1267mbps_19_2mhz_4l[] = {
 	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
 };
 
-static const struct cci_reg_sequence mipi_1272mbps_24mhz_2l[] = {
+static const struct cci_reg_sequence mipi_1224mbps_24mhz_2l[] = {
 	{ IMX258_REG_EXCK_FREQ, 0x1800 },
 	{ IMX258_REG_IVTPXCK_DIV, 10 },
 	{ IMX258_REG_IVTSYCK_DIV, 2 },
 	{ IMX258_REG_PREPLLCK_VT_DIV, 4 },
-	{ IMX258_REG_PLL_IVT_MPY, 212 },
+	{ IMX258_REG_PLL_IVT_MPY, 204 },
 	{ IMX258_REG_IOPPXCK_DIV, 10 },
 	{ IMX258_REG_IOPSYCK_DIV, 1 },
 	{ IMX258_REG_PREPLLCK_OP_DIV, 2 },
@@ -226,16 +264,16 @@ static const struct cci_reg_sequence mipi_1272mbps_24mhz_2l[] = {
 	{ IMX258_REG_PLL_MULT_DRIV, 0 },
 
 	{ IMX258_REG_CSI_LANE_MODE, 1 },
-	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_H, 1272 * 2 },
+	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_H, 1224 * 2 },
 	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
 };
 
-static const struct cci_reg_sequence mipi_1272mbps_24mhz_4l[] = {
+static const struct cci_reg_sequence mipi_1224mbps_24mhz_4l[] = {
 	{ IMX258_REG_EXCK_FREQ, 0x1800 },
 	{ IMX258_REG_IVTPXCK_DIV, 5 },
 	{ IMX258_REG_IVTSYCK_DIV, 2 },
 	{ IMX258_REG_PREPLLCK_VT_DIV, 4 },
-	{ IMX258_REG_PLL_IVT_MPY, 212 },
+	{ IMX258_REG_PLL_IVT_MPY, 204 },
 	{ IMX258_REG_IOPPXCK_DIV, 10 },
 	{ IMX258_REG_IOPSYCK_DIV, 1 },
 	{ IMX258_REG_PREPLLCK_OP_DIV, 2 },
@@ -243,7 +281,7 @@ static const struct cci_reg_sequence mipi_1272mbps_24mhz_4l[] = {
 	{ IMX258_REG_PLL_MULT_DRIV, 0 },
 
 	{ IMX258_REG_CSI_LANE_MODE, 3 },
-	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_H, 1272 * 4 },
+	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_H, 1224 * 4 },
 	{ IMX258_REG_REQ_LINK_BIT_RATE_MBPS_L, 0 },
 };
 
@@ -486,6 +524,7 @@ static const char * const imx258_supply_name[] = {
 	"vana",  /* Analog (2.8V) supply */
 	"vdig",  /* Digital Core (1.2V) supply */
 	"vif",  /* IF (1.8V) supply */
+	"i2c",  /* I2C BUS I/O (1.8V) supply */
 };
 
 #define IMX258_NUM_SUPPLIES ARRAY_SIZE(imx258_supply_name)
@@ -567,11 +606,11 @@ static const struct imx258_link_freq_config link_freq_configs_24[] = {
 		.link_cfg = {
 			[IMX258_2_LANE_MODE] = {
 				.lf_to_pix_rate_factor = 2,
-				.reg_list = REGS(mipi_1272mbps_24mhz_2l),
+				.reg_list = REGS(mipi_1224mbps_24mhz_2l),
 			},
 			[IMX258_4_LANE_MODE] = {
 				.lf_to_pix_rate_factor = 4,
-				.reg_list = REGS(mipi_1272mbps_24mhz_4l),
+				.reg_list = REGS(mipi_1224mbps_24mhz_4l),
 			},
 		}
 	},
@@ -608,6 +647,7 @@ static const struct imx258_mode supported_modes[] = {
 			.width = 4208,
 			.height = 3120,
 		},
+		.has_pdaf = true,
 	},
 	{
 		.width = 2104,
@@ -649,7 +689,7 @@ struct imx258 {
 	struct device *dev;
 
 	struct v4l2_subdev sd;
-	struct media_pad pad;
+	struct media_pad pads[IMX258_PAD_NUM];
 	struct regmap *regmap;
 
 	const struct imx258_variant_cfg *variant_cfg;
@@ -667,6 +707,9 @@ struct imx258 {
 	/* Current mode */
 	const struct imx258_mode *cur_mode;
 
+	/* AF window (shield-pixel output region), active-array pixels */
+	struct v4l2_rect pdaf_window;
+
 	unsigned long link_freq_bitmap;
 	const struct imx258_link_freq_config *link_freq_configs;
 	const s64 *link_freq_menu_items;
@@ -680,6 +723,7 @@ struct imx258 {
 	struct mutex mutex;
 
 	struct clk *clk;
+	struct gpio_desc *reset_gpio;
 	struct regulator_bulk_data supplies[IMX258_NUM_SUPPLIES];
 };
 
@@ -725,6 +769,10 @@ static int imx258_open(struct v4l2_subdev *sd, struct v4l2_subdev_fh *fh)
 	try_crop->top = IMX258_PIXEL_ARRAY_TOP;
 	try_crop->width = IMX258_PIXEL_ARRAY_WIDTH;
 	try_crop->height = IMX258_PIXEL_ARRAY_HEIGHT;
+
+	/* Initialize the PDAF pad's try AF window to the active one */
+	*v4l2_subdev_state_get_crop(fh->state, IMX258_PAD_PDAF) =
+		imx258->pdaf_window;
 
 	return 0;
 }
@@ -839,10 +887,15 @@ static int imx258_enum_mbus_code(struct v4l2_subdev *sd,
 {
 	struct imx258 *imx258 = to_imx258(sd);
 
-	/* Only one bayer format (10 bit) is supported */
 	if (code->index > 0)
 		return -EINVAL;
 
+	if (code->pad == IMX258_PAD_PDAF) {
+		code->code = MEDIA_BUS_FMT_META_16;
+		return 0;
+	}
+
+	/* Only one bayer format (10 bit) is supported */
 	mutex_lock(&imx258->mutex);
 	code->code = imx258_get_format_code(imx258);
 	mutex_unlock(&imx258->mutex);
@@ -898,15 +951,125 @@ static int __imx258_get_pad_format(struct imx258 *imx258,
 	return 0;
 }
 
+/*
+ * The AF window must land on shield-pixel block boundaries (the sensor only
+ * snaps it itself in AUTO mode, which does not exist in all PDAF-capable
+ * readout modes, so MANUAL is used everywhere and the driver does the
+ * snapping). Block size is 43 x 24 pixels; the rectangle is in active-array
+ * coordinates, which is also what the window registers take.
+ */
+static void imx258_pdaf_snap_window(struct v4l2_rect *r)
+{
+	u32 bw = IMX258_PIXEL_ARRAY_WIDTH / IMX258_PD_BLOCKS_H;
+	u32 bh = IMX258_PIXEL_ARRAY_HEIGHT / IMX258_PD_BLOCKS_V;
+	u32 left, top, right, bottom;
+
+	left = min_t(u32, clamp_t(s32, r->left, 0, S32_MAX),
+		     IMX258_PIXEL_ARRAY_WIDTH - bw);
+	top = min_t(u32, clamp_t(s32, r->top, 0, S32_MAX),
+		    IMX258_PIXEL_ARRAY_HEIGHT - bh);
+	left = rounddown(left, bw);
+	top = rounddown(top, bh);
+
+	right = clamp_t(u32, left + r->width, left + bw,
+			IMX258_PIXEL_ARRAY_WIDTH);
+	bottom = clamp_t(u32, top + r->height, top + bh,
+			 IMX258_PIXEL_ARRAY_HEIGHT);
+	right = rounddown(right, bw);
+	bottom = rounddown(bottom, bh);
+
+	r->left = left;
+	r->top = top;
+	r->width = right - left;
+	r->height = bottom - top;
+}
+
+/* PD stream geometry for a window; see the comment at IMX258_PD_BLOCKS_H */
+static void imx258_pdaf_geometry(const struct v4l2_rect *win,
+				 u32 *pkts_per_line, u32 *pkt_lines)
+{
+	u32 px = IMX258_PD_COLS * win->width / IMX258_PIXEL_ARRAY_WIDTH;
+
+	*pkts_per_line = DIV_ROUND_UP(max_t(u32, px, 1),
+				      IMX258_PD_SAMPLES_PER_PKT);
+	*pkt_lines = 2 * DIV_ROUND_UP(win->height, IMX258_PD_LINE_PITCH);
+}
+
+static const struct v4l2_rect *
+__imx258_get_pdaf_window(struct imx258 *imx258,
+			 struct v4l2_subdev_state *sd_state,
+			 enum v4l2_subdev_format_whence which)
+{
+	if (which == V4L2_SUBDEV_FORMAT_TRY)
+		return v4l2_subdev_state_get_crop(sd_state, IMX258_PAD_PDAF);
+	return &imx258->pdaf_window;
+}
+
+/*
+ * Program the shield-pixel output: manual AF window, BYTE2 sample format
+ * (80 x 16-bit samples per packet - a whole number of dwords, which keeps
+ * the packets aligned in the RK3399 ISP FIFO; RAW10's 165-byte payload
+ * would not), output enable. Called with the mode register list already
+ * written - mode_common_regs explicitly clears PHASE_PIX_OUTEN - and again
+ * whenever the window moves while the sensor is powered; the sensor
+ * latches the registers at the next frame.
+ */
+static int imx258_pdaf_configure(struct imx258 *imx258)
+{
+	const struct v4l2_rect *win = &imx258->pdaf_window;
+	int ret = 0;
+
+	cci_write(imx258->regmap, IMX258_REG_AF_WINDOW_MODE,
+		  IMX258_AF_WINDOW_MODE_MANUAL, &ret);
+	cci_write(imx258->regmap, IMX258_REG_AF_WINDOW_X_STA, win->left, &ret);
+	cci_write(imx258->regmap, IMX258_REG_AF_WINDOW_X_END,
+		  win->left + win->width, &ret);
+	cci_write(imx258->regmap, IMX258_REG_AF_WINDOW_Y_STA, win->top, &ret);
+	cci_write(imx258->regmap, IMX258_REG_AF_WINDOW_Y_END,
+		  win->top + win->height, &ret);
+	cci_write(imx258->regmap, IMX258_REG_PDPIX_DATA_RATE,
+		  IMX258_PDPIX_DATA_RATE_BYTE2, &ret);
+	cci_write(imx258->regmap, IMX258_REG_PHASE_PIX_OUTEN, 1, &ret);
+
+	return ret;
+}
+
+/*
+ * The PDAF pad format is computed, not set: the media bus code is generic
+ * 16-bit metadata, the width is the samples per PD packet line and the
+ * height the number of PD packet lines (counting the empty packets the
+ * sensor interleaves with the data ones), both following the AF window.
+ */
+static void __imx258_get_pdaf_format(struct imx258 *imx258,
+				     struct v4l2_subdev_state *sd_state,
+				     struct v4l2_subdev_format *fmt)
+{
+	const struct v4l2_rect *win;
+	u32 ppl, lines;
+
+	win = __imx258_get_pdaf_window(imx258, sd_state, fmt->which);
+	imx258_pdaf_geometry(win, &ppl, &lines);
+
+	fmt->format = (struct v4l2_mbus_framefmt) {
+		.code = MEDIA_BUS_FMT_META_16,
+		.width = ppl * IMX258_PD_SAMPLES_PER_PKT,
+		.height = lines,
+		.field = V4L2_FIELD_NONE,
+	};
+}
+
 static int imx258_get_pad_format(struct v4l2_subdev *sd,
 				 struct v4l2_subdev_state *sd_state,
 				 struct v4l2_subdev_format *fmt)
 {
 	struct imx258 *imx258 = to_imx258(sd);
-	int ret;
+	int ret = 0;
 
 	mutex_lock(&imx258->mutex);
-	ret = __imx258_get_pad_format(imx258, sd_state, fmt);
+	if (fmt->pad == IMX258_PAD_PDAF)
+		__imx258_get_pdaf_format(imx258, sd_state, fmt);
+	else
+		ret = __imx258_get_pad_format(imx258, sd_state, fmt);
 	mutex_unlock(&imx258->mutex);
 
 	return ret;
@@ -926,6 +1089,10 @@ static int imx258_set_pad_format(struct v4l2_subdev *sd,
 	s64 h_blank;
 	s64 pixel_rate;
 	s64 link_freq;
+
+	/* the PDAF pad format follows the AF window and is not settable */
+	if (fmt->pad == IMX258_PAD_PDAF)
+		return imx258_get_pad_format(sd, sd_state, fmt);
 
 	mutex_lock(&imx258->mutex);
 
@@ -991,6 +1158,36 @@ static int imx258_get_selection(struct v4l2_subdev *sd,
 				struct v4l2_subdev_state *sd_state,
 				struct v4l2_subdev_selection *sel)
 {
+	if (sel->pad == IMX258_PAD_PDAF) {
+		struct imx258 *imx258 = to_imx258(sd);
+
+		switch (sel->target) {
+		case V4L2_SEL_TGT_CROP:
+			mutex_lock(&imx258->mutex);
+			sel->r = *__imx258_get_pdaf_window(imx258, sd_state,
+							   sel->which);
+			mutex_unlock(&imx258->mutex);
+			return 0;
+
+		case V4L2_SEL_TGT_CROP_DEFAULT:
+			sel->r.left = IMX258_PIXEL_ARRAY_WIDTH * 3 / 8;
+			sel->r.top = IMX258_PIXEL_ARRAY_HEIGHT * 3 / 8;
+			sel->r.width = IMX258_PIXEL_ARRAY_WIDTH / 4;
+			sel->r.height = IMX258_PIXEL_ARRAY_HEIGHT / 4;
+			imx258_pdaf_snap_window(&sel->r);
+			return 0;
+
+		case V4L2_SEL_TGT_CROP_BOUNDS:
+			sel->r.left = 0;
+			sel->r.top = 0;
+			sel->r.width = IMX258_PIXEL_ARRAY_WIDTH;
+			sel->r.height = IMX258_PIXEL_ARRAY_HEIGHT;
+			return 0;
+		}
+
+		return -EINVAL;
+	}
+
 	switch (sel->target) {
 	case V4L2_SEL_TGT_CROP: {
 		struct imx258 *imx258 = to_imx258(sd);
@@ -1022,6 +1219,79 @@ static int imx258_get_selection(struct v4l2_subdev *sd,
 	}
 
 	return -EINVAL;
+}
+
+/*
+ * Only the AF window on the PDAF pad is settable. The snapped rectangle is
+ * returned so the consumer can map PD samples back to image coordinates;
+ * a change while streaming reprograms the sensor and takes effect at the
+ * next frame.
+ */
+static int imx258_set_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	struct imx258 *imx258 = to_imx258(sd);
+
+	if (sel->pad != IMX258_PAD_PDAF || sel->target != V4L2_SEL_TGT_CROP)
+		return -EINVAL;
+
+	imx258_pdaf_snap_window(&sel->r);
+
+	if (sel->which == V4L2_SUBDEV_FORMAT_TRY) {
+		*v4l2_subdev_state_get_crop(sd_state, IMX258_PAD_PDAF) =
+			sel->r;
+		return 0;
+	}
+
+	mutex_lock(&imx258->mutex);
+
+	imx258->pdaf_window = sel->r;
+
+	if (pm_runtime_get_if_in_use(imx258->dev) > 0) {
+		if (imx258->cur_mode->has_pdaf)
+			imx258_pdaf_configure(imx258);
+		pm_runtime_put(imx258->dev);
+	}
+
+	mutex_unlock(&imx258->mutex);
+
+	return 0;
+}
+
+/*
+ * Advertise the streams this sensor emits: the image, and in PDAF-capable
+ * modes the shield-pixel packets. This is how the RK3399 ISP learns which
+ * data type to divert into its additional-data FIFO.
+ */
+static int imx258_get_frame_desc(struct v4l2_subdev *sd, unsigned int pad,
+				 struct v4l2_mbus_frame_desc *fd)
+{
+	struct imx258 *imx258 = to_imx258(sd);
+
+	memset(fd, 0, sizeof(*fd));
+	fd->type = V4L2_MBUS_FRAME_DESC_TYPE_CSI2;
+
+	mutex_lock(&imx258->mutex);
+
+	fd->entry[0].bus.csi2.vc = 0;
+	fd->entry[0].bus.csi2.dt = MIPI_CSI2_DT_RAW10;
+	fd->num_entries = 1;
+
+	if (imx258->cur_mode->has_pdaf) {
+		u32 ppl, lines;
+
+		imx258_pdaf_geometry(&imx258->pdaf_window, &ppl, &lines);
+
+		fd->entry[1].bus.csi2.vc = 0;
+		fd->entry[1].bus.csi2.dt = IMX258_CSI2_DT_PDAF;
+		fd->entry[1].length = lines * ppl * IMX258_PD_PKT_BYTES;
+		fd->num_entries = 2;
+	}
+
+	mutex_unlock(&imx258->mutex);
+
+	return 0;
 }
 
 /* Start streaming */
@@ -1082,6 +1352,16 @@ static int imx258_start_streaming(struct imx258 *imx258)
 		return ret;
 	}
 
+	/* Shield-pixel output; after the mode lists, which disable it */
+	if (imx258->cur_mode->has_pdaf) {
+		ret = imx258_pdaf_configure(imx258);
+		if (ret) {
+			dev_err(imx258->dev, "%s failed to set PDAF output\n",
+				__func__);
+			return ret;
+		}
+	}
+
 	/* Apply customized values from user */
 	ret =  __v4l2_ctrl_handler_setup(imx258->sd.ctrl_handler);
 	if (ret)
@@ -1124,11 +1404,19 @@ static int imx258_power_on(struct device *dev)
 		return ret;
 	}
 
+	mdelay(20);
+
 	ret = clk_prepare_enable(imx258->clk);
 	if (ret) {
 		dev_err(dev, "failed to enable clock\n");
 		regulator_bulk_disable(IMX258_NUM_SUPPLIES, imx258->supplies);
 	}
+
+	usleep_range(1000, 2000);
+
+	gpiod_set_value_cansleep(imx258->reset_gpio, 0);
+
+	usleep_range(400, 500);
 
 	return ret;
 }
@@ -1139,6 +1427,7 @@ static int imx258_power_off(struct device *dev)
 	struct imx258 *imx258 = to_imx258(sd);
 
 	clk_disable_unprepare(imx258->clk);
+	gpiod_set_value_cansleep(imx258->reset_gpio, 1);
 	regulator_bulk_disable(IMX258_NUM_SUPPLIES, imx258->supplies);
 
 	return 0;
@@ -1203,6 +1492,53 @@ static int imx258_identify_module(struct imx258 *imx258)
 	return 0;
 }
 
+#ifdef CONFIG_VIDEO_ADV_DEBUG
+static int imx258_g_register(struct v4l2_subdev *sd,
+			     struct v4l2_dbg_register *reg)
+{
+	struct imx258 *imx258 = to_imx258(sd);
+	u64 val = 0;
+	int ret;
+
+	if (reg->reg > 0xffff)
+		return -EINVAL;
+
+	reg->size = 1;
+
+	mutex_lock(&imx258->mutex);
+	ret = cci_read(imx258->regmap, CCI_REG8(reg->reg), &val, NULL);
+	mutex_unlock(&imx258->mutex);
+	if (ret)
+		return -EIO;
+
+	reg->val = val;
+	return 0;
+}
+
+static int imx258_s_register(struct v4l2_subdev *sd,
+			     const struct v4l2_dbg_register *reg)
+{
+	struct imx258 *imx258 = to_imx258(sd);
+	int ret;
+
+	if (reg->reg > 0xffff || reg->val > 0xff)
+		return -EINVAL;
+
+	mutex_lock(&imx258->mutex);
+	ret = cci_write(imx258->regmap, CCI_REG8(reg->reg), reg->val, NULL);
+	mutex_unlock(&imx258->mutex);
+
+	return ret;
+}
+#endif
+
+static const struct v4l2_subdev_core_ops imx258_core_ops = {
+#ifdef CONFIG_VIDEO_ADV_DEBUG
+	.g_register = imx258_g_register,
+	.s_register = imx258_s_register,
+#endif
+};
+
 static const struct v4l2_subdev_video_ops imx258_video_ops = {
 	.s_stream = imx258_set_stream,
 };
@@ -1213,9 +1549,12 @@ static const struct v4l2_subdev_pad_ops imx258_pad_ops = {
 	.set_fmt = imx258_set_pad_format,
 	.enum_frame_size = imx258_enum_frame_size,
 	.get_selection = imx258_get_selection,
+	.set_selection = imx258_set_selection,
+	.get_frame_desc = imx258_get_frame_desc,
 };
 
 static const struct v4l2_subdev_ops imx258_subdev_ops = {
+	.core = &imx258_core_ops,
 	.video = &imx258_video_ops,
 	.pad = &imx258_pad_ops,
 };
@@ -1387,6 +1726,11 @@ static int imx258_probe(struct i2c_client *client)
 		return dev_err_probe(imx258->dev, ret,
 				     "failed to get regulators\n");
 
+	imx258->reset_gpio = devm_gpiod_get_optional(&client->dev, "reset",
+						     GPIOD_OUT_HIGH);
+	if (IS_ERR(imx258->reset_gpio))
+		return PTR_ERR(imx258->reset_gpio);
+
 	imx258->clk = devm_v4l2_sensor_clk_get_legacy(imx258->dev, NULL, false,
 						      0);
 	if (IS_ERR(imx258->clk))
@@ -1480,10 +1824,19 @@ static int imx258_probe(struct i2c_client *client)
 	imx258->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
 	imx258->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
 
-	/* Initialize source pad */
-	imx258->pad.flags = MEDIA_PAD_FL_SOURCE;
+	/* Initialize source pads: the image, and the PDAF stream */
+	imx258->pads[IMX258_PAD_IMAGE].flags = MEDIA_PAD_FL_SOURCE;
+	imx258->pads[IMX258_PAD_PDAF].flags = MEDIA_PAD_FL_SOURCE;
 
-	ret = media_entity_pads_init(&imx258->sd.entity, 1, &imx258->pad);
+	/* default AF window: centred quarter of each axis */
+	imx258->pdaf_window.left = IMX258_PIXEL_ARRAY_WIDTH * 3 / 8;
+	imx258->pdaf_window.top = IMX258_PIXEL_ARRAY_HEIGHT * 3 / 8;
+	imx258->pdaf_window.width = IMX258_PIXEL_ARRAY_WIDTH / 4;
+	imx258->pdaf_window.height = IMX258_PIXEL_ARRAY_HEIGHT / 4;
+	imx258_pdaf_snap_window(&imx258->pdaf_window);
+
+	ret = media_entity_pads_init(&imx258->sd.entity, IMX258_PAD_NUM,
+				     imx258->pads);
 	if (ret)
 		goto error_handler_free;
 

@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 #include <linux/bitfield.h>
+#include <linux/of.h>
 #include <linux/pci.h>
 
 #include "xhci.h"
@@ -623,6 +624,14 @@ static void xhci_clear_port_change_bit(struct xhci_hcd *xhci, u16 wValue, struct
 	xhci_portsc_writel(port, portsc | status);
 	portsc = xhci_portsc_readl(port);
 
+#ifdef CONFIG_ARCH_SUNXI
+	if (of_machine_is_compatible("allwinner,sun60i-a733")) {
+		port->cleared_change_bits |= status;
+		xhci_info(xhci, "[SUNXI-A733] Port %d cleared_change_bits=0x%08x (added 0x%x)\n",
+			  port->hcd_portnum + 1, port->cleared_change_bits, status);
+	}
+#endif
+
 	xhci_dbg(xhci, "clear port%d %s change, portsc: 0x%x\n",
 		 port->hcd_portnum + 1, port_change_bit, portsc);
 }
@@ -1144,6 +1153,15 @@ static u32 xhci_get_port_status(struct usb_hcd *hcd, struct xhci_bus_state *bus_
 	rhub = xhci_get_rhub(hcd);
 	port = rhub->ports[portnum];
 
+#ifdef CONFIG_ARCH_SUNXI
+	if (of_machine_is_compatible("allwinner,sun60i-a733")) {
+		if (!(portsc & PORT_CONNECT) || (portsc & PORT_PLS_MASK) > XDEV_U2)
+			port->cleared_change_bits = 0;
+		else
+			portsc &= ~port->cleared_change_bits;
+	}
+#endif
+
 	/* common wPortChange bits */
 	if (portsc & PORT_CSC)
 		status |= USB_PORT_STAT_C_CONNECTION << 16;
@@ -1466,7 +1484,17 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 			xhci_set_port_power(xhci, port, true, &flags);
 			break;
 		case USB_PORT_FEAT_RESET:
-			portsc |= PORT_RESET;
+#ifdef CONFIG_ARCH_SUNXI
+			if (of_machine_is_compatible("allwinner,sun60i-a733")) {
+				port->cleared_change_bits &= ~PORT_RC;
+				if (hcd->speed >= HCD_USB3 &&
+				    (portsc & PORT_PLS_MASK) != XDEV_U0)
+					portsc |= PORT_WR;
+				else
+					portsc |= PORT_RESET;
+			} else
+#endif
+				portsc |= PORT_RESET;
 			xhci_portsc_writel(port, portsc);
 
 			portsc = xhci_portsc_readl(port);
@@ -1481,6 +1509,10 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				 hcd->self.busnum, portnum + 1, portsc);
 			break;
 		case USB_PORT_FEAT_BH_PORT_RESET:
+#ifdef CONFIG_ARCH_SUNXI
+			if (of_machine_is_compatible("allwinner,sun60i-a733"))
+				port->cleared_change_bits &= ~PORT_WRC;
+#endif
 			portsc |= PORT_WR;
 			xhci_portsc_writel(port, portsc);
 			portsc = xhci_portsc_readl(port);
@@ -1660,6 +1692,15 @@ int xhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 			break;
 		}
 		trace_xhci_hub_status_data(ports[i], temp);
+
+#ifdef CONFIG_ARCH_SUNXI
+		if (of_machine_is_compatible("allwinner,sun60i-a733")) {
+			if (!(temp & PORT_CONNECT) || (temp & PORT_PLS_MASK) > XDEV_U2)
+				ports[i]->cleared_change_bits = 0;
+			else
+				temp &= ~ports[i]->cleared_change_bits;
+		}
+#endif
 
 		if ((temp & mask) != 0 ||
 			(bus_state->port_c_suspend & 1 << i) ||

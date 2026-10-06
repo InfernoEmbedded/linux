@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
-rockchip-isp1-y := rkisp1-capture.o \
+rockchip-isp1-y := rkisp1-addata.o \
+		   rkisp1-capture.o \
 		   rkisp1-common.o \
 		   rkisp1-csi.o \
 		   rkisp1-dev.o \

@@ -943,6 +943,14 @@ static int mv64xxx_i2c_init_recovery_info(struct mv64xxx_i2c_data *drv_data,
 		return -ENODEV;
 	}
 
+	if (IS_ERR(pinctrl_lookup_state(rinfo->pinctrl, "gpio")) &&
+		IS_ERR(pinctrl_lookup_state(rinfo->pinctrl, "recovery"))) {
+		/* No recovery state is vailable in pinctrl. */
+		devm_pinctrl_put(rinfo->pinctrl);
+		rinfo->pinctrl = NULL;
+		return 0;
+	}
+
 	drv_data->adapter.bus_recovery_info = rinfo;
 	return 0;
 }
@@ -1045,6 +1053,10 @@ mv64xxx_i2c_probe(struct platform_device *pd)
 	pm_runtime_set_autosuspend_delay(&pd->dev, MSEC_PER_SEC);
 	pm_runtime_use_autosuspend(&pd->dev);
 	pm_runtime_enable(&pd->dev);
+	/* Pin device active (intentionally un-paired get) to avoid circular PM deadlock */
+	rc = pm_runtime_resume_and_get(&pd->dev);
+	if (rc < 0)
+		dev_warn(&pd->dev, "failed to resume during probe: %d\n", rc);
 	if (!pm_runtime_enabled(&pd->dev)) {
 		rc = mv64xxx_i2c_runtime_resume(&pd->dev);
 		if (rc)

@@ -239,7 +239,7 @@ static int mpfs_musb_exit(struct musb *musb)
 }
 
 static const struct musb_platform_ops mpfs_ops = {
-	.quirks		= MUSB_DMA_INVENTRA,
+	.quirks		= MUSB_DMA_SW_MODE_SELECT,
 	.init		= mpfs_musb_init,
 	.exit		= mpfs_musb_exit,
 	.fifo_mode	= 2,

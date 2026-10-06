@@ -627,8 +627,10 @@ static int st7789v_probe(struct spi_device *spi)
 
 	spi->bits_per_word = 9;
 	ret = spi_setup(spi);
-	if (ret < 0)
+	if (ret < 0) {
+		spi->bits_per_word = 8;
 		return dev_err_probe(&spi->dev, ret, "Failed to setup spi\n");
+	}
 
 	ctx->info = device_get_match_data(&spi->dev);
 

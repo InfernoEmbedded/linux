@@ -2370,8 +2370,18 @@ static int sta_link_apply_parameters(struct ieee80211_local *local,
 	    params->supported_rates_len &&
 	    !ieee80211_parse_bitrates(sband, params->supported_rates,
 				      params->supported_rates_len,
-				      &link_sta->pub->supp_rates[sband->band]))
-		return -EINVAL;
+				      &link_sta->pub->supp_rates[sband->band])) {
+		/*
+		 * Some misbehaving stations report legacy rates of the
+		 * wrong band in their (re)association request (e.g. 11b
+		 * rates on 5 GHz), so none of them may parse. Rejecting
+		 * the station outright would prevent it from ever
+		 * associating; fall back to the band's mandatory rates
+		 * instead, which also keeps the rate bitmap non-empty.
+		 */
+		link_sta->pub->supp_rates[sband->band] =
+			ieee80211_mandatory_rates(sband);
+	}
 
 	if (params->ht_capa)
 		ieee80211_ht_cap_ie_to_sta_ht_cap(sdata, own_ht_cap,

@@ -42,8 +42,9 @@
 
 		key-0 {
 			label = "k1";
-			linux,code = <BTN_0>;
+			linux,code = <KEY_POWER>;
 			gpios = <&r_pio 0 3 GPIO_ACTIVE_LOW>; /* PL3 */
+			wakeup-source;
 		};
 	};
 
@@ -101,6 +102,13 @@
 };
 
 &ehci0 {
+	status = "okay";
+};
+
+&emac {
+	phy-handle = <&int_mii_phy>;
+	phy-mode = "mii";
+	allwinner,leds-active-low;
 	status = "okay";
 };
 

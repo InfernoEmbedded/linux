@@ -26,8 +26,13 @@
 		compatible = "pwm-backlight";
 		pwms = <&pwm 0 50000 PWM_POLARITY_INVERTED>;
 		enable-gpios = <&pio 1 4 GPIO_ACTIVE_HIGH>; /* PB4 */
-		brightness-levels = <0 10 20 30 40 50 60 70 80 90 100>;
-		default-brightness-level = <8>;
+		/* no brightness-levels: the driver generates a fine
+		 * CIE 1931 perceptually uniform table (as on the
+		 * PinePhone); the boost regulator starts reacting at
+		 * ~11% duty (measured: light from CIE step 1250/3124,
+		 * lightness 0.40 -> ((40+16)/116)^3 = 0.113), so the
+		 * curve is offset to start there */
+		lth-brightness = <13>;
 		power-supply = <&reg_vcc3v3>;
 	};
 
@@ -79,7 +84,6 @@
 		gpio = <&pio 2 14 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 		vin-supply = <&reg_1v8>;
-		regulator-always-on;
 	};
 
 	reg_1v8_ctp: regulator-ctp {
@@ -112,6 +116,7 @@
 
 &i2c0 {
 	status = "okay";
+	//XXX: bsp has pullup on PB0/PB1 pins enabled, but it works without it
 
 	axp209: pmic@34 {
 		reg = <0x34>;
@@ -127,13 +132,61 @@
 	pcf8563: rtc@51 {
 		compatible = "nxp,pcf8563";
 		reg = <0x51>;
+		#clock-cells = <0>;
+	};
+
+	// eInk display PMIC
+	tps65185: pmic@68 {
+		compatible = "ti,tps65185";
+		reg = <0x68>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <1 10 IRQ_TYPE_LEVEL_LOW>; /* PB10 */
+
+		wakeup-gpios = <&pio 3 18 GPIO_ACTIVE_HIGH>; /* PD18 */
+		enable-gpios = <&pio 4 7 GPIO_ACTIVE_HIGH>; /* PE7 */
+		vcom-ctrl-gpios = <&pio 3 19 GPIO_ACTIVE_HIGH>; /* PD19 */
+		//XXX: not a pullup on BSP (might have an external resistor)
+		pwr-good-gpios = <&pio 4 6 (GPIO_ACTIVE_HIGH | GPIO_PULL_UP)>; /* PE6 */
+
+		vin-supply = <&reg_vcc3v3>;
+
+		regulators {
+			tps_v3p3: v3p3 {
+				regulator-name = "eink-v3p3";
+			};
+
+			tps_vposneg: vposneg {
+				regulator-name = "eink-vposneg";
+				regulator-min-microvolt = <15000000>;
+				regulator-max-microvolt = <15000000>;
+			};
+
+			tps_vcom: vcom {
+				regulator-name = "eink-vcom";
+				/* magnitude; reasonable range around the
+				 * panel's -3.12V for waveform vcom offsets */
+				regulator-min-microvolt = <2000000>;
+				regulator-max-microvolt = <4000000>;
+			};
+		};
 	};
 };
 
 &i2c2 {
 	status = "okay";
 
-	/* Touchpanel is connected here. */
+	touchpanel@24 {
+		compatible = "cypress,tma445";
+		reg = <0x24>;
+
+		interrupt-parent = <&pio>;
+		interrupts = <6 11 IRQ_TYPE_EDGE_FALLING>; /* PG11 */
+
+		vdd-supply = <&reg_1v8_ctp>;
+		power-gpios = <&pio 4 5 GPIO_ACTIVE_LOW>; /* PE5 */
+		reset-gpios = <&pio 1 3 GPIO_ACTIVE_LOW>; /* PB3 */
+	};
 };
 
 &lradc {
@@ -179,6 +232,20 @@
 	status = "okay";
 };
 
+&pio {
+	eink_pins_active: eink-pins-lcd {
+		pins = "PD3", "PD4", "PD5", "PD6", "PD7", "PD10", "PD11", "PD12",
+			"PD13", "PD15", "PD20", "PD21", "PD22", "PD23", "PD24";
+		function = "lcd0";
+	};
+
+	eink_pins_idle: eink-pins-gpio {
+		pins = "PD3", "PD4", "PD5", "PD6", "PD7", "PD10", "PD11", "PD12",
+			"PD13", "PD15", "PD20", "PD21", "PD22", "PD23", "PD24";
+		function = "gpio_out";
+	};
+};
+
 &pwm {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pwm0_pin>;
@@ -219,6 +286,59 @@
 	regulator-ramp-delay = <1600>;
 };
 
+&soc {
+	display-controller@1c0c000 {
+		pinctrl-names = "idle", "active";
+		pinctrl-0 = <&eink_pins_idle>;
+		pinctrl-1 = <&eink_pins_active>;
+
+		all-gpios = <&pio 3 3 GPIO_ACTIVE_HIGH>,
+			<&pio 3 4 GPIO_ACTIVE_HIGH>,
+			<&pio 3 5 GPIO_ACTIVE_HIGH>,
+			<&pio 3 6 GPIO_ACTIVE_HIGH>,
+			<&pio 3 7 GPIO_ACTIVE_HIGH>,
+			<&pio 3 10 GPIO_ACTIVE_HIGH>,
+			<&pio 3 11 GPIO_ACTIVE_HIGH>,
+			<&pio 3 12 GPIO_ACTIVE_HIGH>,
+			<&pio 3 13 GPIO_ACTIVE_HIGH>,
+			<&pio 3 15 GPIO_ACTIVE_HIGH>,
+			<&pio 3 20 GPIO_ACTIVE_HIGH>,
+			<&pio 3 21 GPIO_ACTIVE_HIGH>,
+			<&pio 3 22 GPIO_ACTIVE_HIGH>,
+			<&pio 3 23 GPIO_ACTIVE_HIGH>,
+			<&pio 3 24 GPIO_ACTIVE_HIGH>;
+
+		compatible = "custom,pocketbook-touch-lux-3-tcon0-ed060xd4-display";
+		reg = <0x01c0c000 0x1000>, // TCON0 regs
+			<0x01e60000 0x10000>; // DEBE regs
+
+		interrupts = <44>; // TCON interrupt
+
+		resets = <&ccu RST_LCD>, <&ccu RST_DE_BE>;
+		reset-names = "tcon", "be";
+
+		clocks = <&ccu CLK_AHB_LCD>, <&ccu CLK_TCON_CH0>,
+			 <&ccu CLK_AHB_DE_BE>, <&ccu CLK_DE_BE>,
+			 <&ccu CLK_DRAM_DE_BE>;
+		clock-names = "tcon_bus", "tcon_mod",
+			      "be_bus", "be_mod",
+			      "be_ram";
+
+		assigned-clocks = <&ccu CLK_DE_BE>;
+		assigned-clock-rates = <300000000>;
+
+		interconnects = <&mbus 18>;
+		interconnect-names = "dma-mem";
+
+		vdd-supply = <&tps_v3p3>;
+		drive-supply = <&tps_vposneg>;
+		vcom-supply = <&tps_vcom>;
+		/* panel nominal VCOM magnitude (VCOM itself is negative) */
+		vcom-microvolt = <3120000>;
+		control-device-name = "eink-panel";
+	};
+};
+
 &spi2 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi2_pe_pins>, <&spi2_cs0_pe_pin>;
@@ -230,6 +350,7 @@
 		compatible = "macronix,mx25u4033", "jedec,spi-nor";
 		reg = <0>;
 		spi-max-frequency = <4000000>;
+		vcc-supply = <&reg_1v8_nor>;
 	};
 };
 
@@ -253,6 +374,8 @@
 };
 
 &usbphy {
+	//XXX: might not work, need to test
+	usb0_vbus_det-gpios = <&pio 6 1 GPIO_ACTIVE_HIGH>; /* PG1 */
 	usb1_vbus-supply = <&reg_ldo3>;
 	status = "okay";
 };

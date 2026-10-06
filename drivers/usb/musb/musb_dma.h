@@ -49,35 +49,23 @@ struct musb_hw_ep;
 #define	is_dma_capable()	(1)
 #endif
 
-#ifdef CONFIG_USB_UX500_DMA
-#define musb_dma_ux500(musb)		(musb->ops->quirks & MUSB_DMA_UX500)
-#else
-#define musb_dma_ux500(musb)		0
-#endif
-
-#ifdef CONFIG_USB_TI_CPPI41_DMA
-#define musb_dma_cppi41(musb)		(musb->ops->quirks & MUSB_DMA_CPPI41)
-#else
-#define musb_dma_cppi41(musb)		0
-#endif
-
-#ifdef CONFIG_USB_TUSB_OMAP_DMA
-#define tusb_dma_omap(musb)		(musb->ops->quirks & MUSB_DMA_TUSB_OMAP)
-#else
-#define tusb_dma_omap(musb)		0
-#endif
-
-#ifdef CONFIG_USB_INVENTRA_DMA
-#define musb_dma_inventra(musb)		(musb->ops->quirks & MUSB_DMA_INVENTRA)
-#else
-#define musb_dma_inventra(musb)		0
-#endif
-
-#if defined(CONFIG_USB_TI_CPPI41_DMA)
-#define	is_cppi_enabled(musb)		musb_dma_cppi41(musb)
-#else
-#define	is_cppi_enabled(musb)		0
-#endif
+/*
+ * DMA behavioral capability accessors. Generic core/host/gadget code asks what
+ * a DMA engine needs, never which engine it is; each glue driver declares these
+ * in its musb_platform_ops.quirks.
+ *
+ * A glue declares its quirks statically, so they say what its engine would need
+ * if it were driving the transfer -- not that it is. DMA may be off for this
+ * build (MUSB_PIO_ONLY), for this boot (use_dma=0), for this SoC (dma_init
+ * returned NULL) or just for this request (not mapped). Callers must therefore
+ * pair these with is_dma_capable(), musb->dma_controller, a live channel or
+ * is_buffer_mapped(), or PIO transfers end up taking DMA-shaped paths.
+ */
+#define musb_dma_sw_mode_select(musb)	 ((musb)->ops->quirks & MUSB_DMA_SW_MODE_SELECT)
+#define musb_dma_engine_managed(musb)	 ((musb)->ops->quirks & MUSB_DMA_ENGINE_MANAGED)
+#define musb_dma_queue_autoadvance(musb) ((musb)->ops->quirks & MUSB_DMA_QUEUE_AUTOADVANCE)
+#define musb_dma_rx_mode_autoclear(musb) ((musb)->ops->quirks & MUSB_DMA_RX_MODE_AUTOCLEAR)
+#define musb_dma_rx_mode1_always(musb)	 ((musb)->ops->quirks & MUSB_DMA_RX_MODE1_ALWAYS)
 
 /*
  * DMA channel status ... updated by the dma controller driver whenever that

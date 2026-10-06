@@ -27,6 +27,17 @@ config MACH_SUN5I
 	select SUN4I_INTC
 	select SUN5I_HSTIMER
 
+config SUN5I_PM
+	bool "Allwinner A13 (sun5i) suspend to RAM support"
+	depends on MACH_SUN5I && PM_SLEEP
+	select ARM_CPU_SUSPEND
+	help
+	  Suspend to RAM for the Allwinner A13: the DRAM is put into
+	  self-refresh and the SoC power rails are cut via the AXP209
+	  PMIC. Waking up reboots through the bootloader SPL, which
+	  must have matching support to recover the DRAM and jump back
+	  into the kernel.
+
 config MACH_SUN6I
 	bool "Allwinner A31 (sun6i) SoCs support"
 	default ARCH_SUNXI

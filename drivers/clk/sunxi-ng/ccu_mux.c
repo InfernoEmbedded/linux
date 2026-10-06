@@ -299,6 +299,9 @@ static int ccu_mux_notifier_cb(struct notifier_block *nb,
 	struct ccu_mux_nb *mux = to_ccu_mux_nb(nb);
 	int ret = 0;
 
+	if (mux->once && mux->once_done)
+		return notifier_from_errno(0);
+
 	if (event == PRE_RATE_CHANGE) {
 		mux->original_index = ccu_mux_helper_get_parent(mux->common,
 								mux->cm);
@@ -307,6 +310,8 @@ static int ccu_mux_notifier_cb(struct notifier_block *nb,
 	} else if (event == POST_RATE_CHANGE) {
 		ret = ccu_mux_helper_set_parent(mux->common, mux->cm,
 						mux->original_index);
+						
+		mux->once_done = 1;
 	}
 
 	udelay(mux->delay_us);

@@ -176,6 +176,26 @@ static int rpmsg_eptdev_open(struct inode *inode, struct file *filp)
 
 	ept->flow_cb = rpmsg_ept_flow_cb;
 	eptdev->ept = ept;
+
+	/*
+	 * sunxi E906 name-service channels (client, heartbeat) only learn our
+	 * endpoint address once they receive a message: their endpoints are
+	 * auto-bound on RX.  Send a one-byte no-op so the remote endpoint
+	 * binds and starts sending data (heartbeat, client create) to us.
+	 */
+	if (rpdev->announce && !strncmp(rpdev->id.name, "sunxi,", 6)) {
+		int ret = rpmsg_trysendto(ept, "\0", 1, eptdev->chinfo.dst);
+
+		if (ret) {
+			if (!eptdev->default_ept)
+				rpmsg_destroy_ept(ept);
+			eptdev->ept = NULL;
+			put_device(dev);
+			mutex_unlock(&eptdev->ept_lock);
+			return ret;
+		}
+	}
+
 	filp->private_data = eptdev;
 	mutex_unlock(&eptdev->ept_lock);
 
@@ -534,6 +554,8 @@ static void rpmsg_chrdev_remove(struct rpmsg_device *rpdev)
 static struct rpmsg_device_id rpmsg_chrdev_id_table[] = {
 	{ .name	= "rpmsg-raw" },
 	{ .name	= "rpmsg_chrdev" },
+	{ .name	= "sunxi,rpmsg_client" },
+	{ .name	= "sunxi,rpmsg_heartbeat" },
 	{ },
 };
 MODULE_DEVICE_TABLE(rpmsg, rpmsg_chrdev_id_table);

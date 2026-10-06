@@ -605,6 +605,13 @@ int st_sensors_verify_id(struct iio_dev *indio_dev)
 		err = regmap_read(sdata->regmap,
 				  sdata->sensor_settings->wai_addr, &wai);
 		if (err < 0) {
+			if (err == -ENXIO) {
+				dev_info(parent,
+					 "%s is not present on the bus\n",
+					 indio_dev->name);
+				return err;
+			}
+
 			return dev_err_probe(parent, err,
 					     "failed to read Who-Am-I register.\n");
 		}

@@ -6,6 +6,7 @@
 #include "sun55i-a523.dtsi"
 
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/leds/common.h>
 
 / {
@@ -16,10 +17,48 @@
 		ethernet0 = &gmac0;
 		ethernet1 = &gmac1;
 		serial0 = &uart0;
+		serial1 = &uart1;
 	};
 
 	chosen {
 		stdout-path = "serial0:115200n8";
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		riscvsram0_reserved: riscvsram0@7280000 {
+			reg = <0x0 0x07280000 0x0 0x40000>;
+			no-map;
+		};
+
+		riscvsram1_reserved: riscvsram1@72c0000 {
+			reg = <0x0 0x072c0000 0x0 0x40000>;
+			no-map;
+		};
+
+		e906_dram_reserved: e906_dram@60000000 {
+			reg = <0x0 0x60000000 0x0 0xa00000>;
+			no-map;
+		};
+
+		rv_vdev0buffer: vdev0buffer@4ae00000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x4ae00000 0x0 0x40000>;
+			no-map;
+		};
+
+		rv_vdev0vring0: vdev0vring0@4ae40000 {
+			reg = <0x0 0x4ae40000 0x0 0x2000>;
+			no-map;
+		};
+
+		rv_vdev0vring1: vdev0vring1@4ae42000 {
+			reg = <0x0 0x4ae42000 0x0 0x2000>;
+			no-map;
+		};
 	};
 
 	ext_osc32k: ext-osc32k-clk {
@@ -63,6 +102,12 @@
 		gpio = <&pio 8 12 GPIO_ACTIVE_HIGH>;	/* PI12 */
 		enable-active-high;
 	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&pio 6 13 GPIO_ACTIVE_LOW>;	/* PG13 WL-REG-ON */
+		post-power-on-delay-ms = <200>;
+	};
 };
 
 &ehci0 {
@@ -97,6 +142,12 @@
 
 &gpu {
 	mali-supply = <&reg_dcdc2>;
+	status = "okay";
+};
+
+&ir {
+	pinctrl-names = "default";
+	pinctrl-0 = <&ir_rx_pin>;
 	status = "okay";
 };
 
@@ -165,6 +216,25 @@
 	cd-gpios = <&pio 5 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* PF6 */
 	bus-width = <4>;
 	status = "okay";
+};
+
+&mmc1 {
+	bus-width = <4>;
+	max-frequency = <40000000>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc1_pins>;
+	vmmc-supply = <&reg_dcdc4>;
+	vqmmc-supply = <&reg_bldo1>;
+	status = "okay";
+
+	wifi@1 {
+		reg = <1>;
+		interrupt-parent = <&pio>;
+		interrupts = <6 14 IRQ_TYPE_LEVEL_LOW>;	/* PG14 WL-WAKE-AP */
+		interrupt-names = "host-wake";
+	};
 };
 
 &mmc2 {
@@ -283,6 +353,8 @@
 			};
 
 			reg_bldo1: bldo1 {
+				/* VCC-PG (PG port) + VCCIO-WIFI (AIC8800 VDDIO + BT pull-ups) */
+				regulator-always-on;
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
 				regulator-name = "vcc-pg-wifi-lvds";
@@ -393,6 +465,12 @@
  *	vcc-pl-supply = <&reg_aldo3>;
  */
 	vcc-pm-supply = <&reg_aldo3>;
+
+	r_spi0_lcd_pins: r-spi0-lcd-pins {
+		pins = "PL10", "PL11", "PL12";
+		function = "s_spi0";
+		allwinner,pinmux = <6>;
+	};
 };
 
 &rtc {
@@ -401,6 +479,33 @@
 	clock-names = "bus", "hosc", "ahb", "ext-osc32k";
 	assigned-clocks = <&rtc CLK_OSC32K>;
 	assigned-clock-rates = <32768>;
+};
+
+&r_spi0 {
+	/*
+	 * The mcu_dma controller cannot serve the R-domain SPI0 (the
+	 * dmaengine_prep_slave_sg call fails with -EINVAL), so drop the
+	 * RX channel to keep the driver in PIO mode.
+	 */
+	dmas = <&mcu_dma 13>;
+	dma-names = "tx";
+	pinctrl-names = "default";
+	pinctrl-0 = <&r_spi0_lcd_pins>;
+	status = "okay";
+
+	lcd: st7789v@0 {
+		compatible = "sitronix,st7789v";
+		reg = <0>;
+		spi-max-frequency = <10000000>;
+		dc-gpios = <&r_pio 0 13 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&r_pio 0 9 GPIO_ACTIVE_LOW>;
+		led-gpios = <&r_pio 0 8 GPIO_ACTIVE_HIGH>;
+		width = <135>;
+		height = <240>;
+		buswidth = <8>;
+		rotate = <90>;
+		bgr;
+	};
 };
 
 &spi0  {
@@ -424,6 +529,20 @@
 	status = "okay";
 };
 
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pins>, <&uart1_rts_cts_pins>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		/* aic8800-bt */
+		shutdown-gpios = <&pio 6 12 GPIO_ACTIVE_LOW>;	/* PG12 BT-RESETN */
+		host-wakeup-gpios = <&pio 6 10 GPIO_ACTIVE_HIGH>;	/* PG10 BT-HOST-WAKE */
+		device-wakeup-gpios = <&pio 6 11 GPIO_ACTIVE_HIGH>;	/* PG11 AP-WAKE-BT */
+	};
+};
+
 &usb_otg {
 	 /*
 	  * The CC pins of the USB-C port have two pull-down resistors
@@ -440,5 +559,28 @@
 &usbphy {
 	usb0_vbus-supply = <&reg_usb_vbus>;
 	usb0_vbus_det-gpios = <&pio 8 13 GPIO_ACTIVE_HIGH>; /* PI13 */
+	status = "okay";
+};
+
+&e906_rproc {
+	mboxes = <&msgbox 8>, <&msgbox 10>;
+	mbox-names = "arm-kick", "arm-standby";
+	memory-region = <&riscvsram0_reserved>, <&riscvsram1_reserved>,
+			<&rv_vdev0buffer>, <&rv_vdev0vring0>,
+			<&rv_vdev0vring1>, <&e906_dram_reserved>;
+	memory-mappings =
+		/* < DA		len		PA >	*/
+		/* DSP RAM */
+		< 0x20000	0x20000		0x20000 >,
+		/* SRAM A2 */
+		< 0x40000	0x24000		0x40000 >,
+		/* DDR */
+		< 0x8000000	0x37f00000	0x8000000 >,
+		/* SRAM SPACE 0 */
+		< 0x3ffc0000	0x40000		0x07280000 >,
+		/* SRAM SPACE 1 */
+		< 0x40000000	0x40000		0x072c0000 >,
+		/* DRAM SPACE */
+		< 0x40040000	0x3ffc0000	0x40040000 >;
 	status = "okay";
 };

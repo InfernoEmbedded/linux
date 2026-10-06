@@ -235,10 +235,8 @@ static struct ccu_nm pll_audio_hs_clk = {
 	.m		= _SUNXI_CCU_DIV(16, 6),
 	.sdm		= _SUNXI_CCU_SDM(pll_audio_sdm_table,
 					 BIT(24), 0x178, BIT(31)),
-	.fixed_post_div = 2,
 	.common		= {
-		.features	= CCU_FEATURE_FIXED_POSTDIV |
-				  CCU_FEATURE_SIGMA_DELTA_MOD,
+		.features	= CCU_FEATURE_SIGMA_DELTA_MOD,
 		.reg		= 0x078,
 		.hw.init	= CLK_HW_INIT("pll-audio-hs", "osc24M",
 					      &ccu_nm_ops,

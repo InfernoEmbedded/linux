@@ -29,6 +29,15 @@ struct ccu_nkmp {
 	unsigned int		fixed_post_div;
 	unsigned int		max_rate;
 
+	/*
+	 * Valid range for the N*K product (VCO constraint) and the maximum
+	 * output rate at which the P divider may still be used. Zero means
+	 * unrestricted.
+	 */
+	unsigned int		min_nk;
+	unsigned int		max_nk;
+	unsigned int		max_p_rate;
+
 	struct ccu_common	common;
 };
 

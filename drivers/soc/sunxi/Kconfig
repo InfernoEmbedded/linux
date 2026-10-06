@@ -19,3 +19,5 @@ config SUNXI_SRAM
 	  Say y here to enable the SRAM controller support. This
 	  device is responsible on mapping the SRAM in the sunXi SoCs
 	  whether to the CPU/DMA, or to the devices.
+
+source "drivers/soc/sunxi/vipcore/Kconfig"

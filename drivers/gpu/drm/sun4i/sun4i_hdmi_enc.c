@@ -29,6 +29,8 @@
 #include <drm/display/drm_hdmi_helper.h>
 #include <drm/display/drm_hdmi_state_helper.h>
 
+#include <sound/soc.h>
+
 #include "sun4i_backend.h"
 #include "sun4i_crtc.h"
 #include "sun4i_drv.h"
@@ -82,6 +84,11 @@ static void sun4i_hdmi_disable(struct drm_encoder *encoder,
 	u32 val;
 
 	DRM_DEBUG_DRIVER("Disabling the HDMI Output\n");
+
+#ifdef CONFIG_DRM_SUN4I_HDMI_AUDIO
+	if (hdmi->hdmi_audio)
+		sun4i_hdmi_audio_destroy(hdmi);
+#endif
 
 	val = readl(hdmi->base + SUN4I_HDMI_VID_CTRL_REG);
 	val &= ~SUN4I_HDMI_VID_CTRL_ENABLE;
@@ -170,6 +177,11 @@ static void sun4i_hdmi_enable(struct drm_encoder *encoder,
 		val |= SUN4I_HDMI_VID_CTRL_HDMI_MODE;
 
 	writel(val, hdmi->base + SUN4I_HDMI_VID_CTRL_REG);
+
+#ifdef CONFIG_DRM_SUN4I_HDMI_AUDIO
+	if (hdmi->hdmi_audio && sun4i_hdmi_audio_create(hdmi))
+		DRM_ERROR("Couldn't create the HDMI audio adapter\n");
+#endif
 }
 
 static const struct drm_encoder_helper_funcs sun4i_hdmi_helper_funcs = {
@@ -205,24 +217,24 @@ sun4i_hdmi_connector_clock_valid(const struct drm_connector *connector,
 static int sun4i_hdmi_get_modes(struct drm_connector *connector)
 {
 	struct sun4i_hdmi *hdmi = drm_connector_to_sun4i_hdmi(connector);
-	const struct drm_edid *drm_edid;
+	struct edid *edid;
 	int ret;
 
-	drm_edid = drm_edid_read_ddc(connector, hdmi->ddc_i2c ?: hdmi->i2c);
-
-	drm_edid_connector_update(connector, drm_edid);
-	cec_s_phys_addr(hdmi->cec_adap,
-			connector->display_info.source_physical_address, false);
-
-	if (!drm_edid)
+	edid = drm_get_edid(connector, hdmi->ddc_i2c ?: hdmi->i2c);
+	if (!edid)
 		return 0;
+
+#ifdef CONFIG_DRM_SUN4I_HDMI_AUDIO
+	hdmi->hdmi_audio = drm_detect_monitor_audio(edid);
+#endif
 
 	DRM_DEBUG_DRIVER("Monitor is %s monitor\n",
 			 connector->display_info.is_hdmi ? "an HDMI" : "a DVI");
 
-
-	ret = drm_edid_connector_add_modes(connector);
-	drm_edid_free(drm_edid);
+	drm_connector_update_edid_property(connector, edid);
+	cec_s_phys_addr_from_edid(hdmi->cec_adap, edid);
+	ret = drm_add_edid_modes(connector, edid);
+	kfree(edid);
 
 	return ret;
 }

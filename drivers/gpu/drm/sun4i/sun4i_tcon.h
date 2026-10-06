@@ -12,6 +12,7 @@
 
 #include <drm/drm_crtc.h>
 
+#include <linux/hrtimer.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/mod_devicetable.h>
@@ -19,6 +20,8 @@
 
 #define SUN4I_TCON_GCTL_REG			0x0
 #define SUN4I_TCON_GCTL_TCON_ENABLE			BIT(31)
+#define SUN4I_TCON_GCTL_PAD_SEL				BIT(1)
+#define SUN4I_TCON_GCTL_GAMMA_ENABLE			BIT(30)
 #define SUN4I_TCON_GCTL_IOMAP_MASK			BIT(0)
 #define SUN4I_TCON_GCTL_IOMAP_TCON1			(1 << 0)
 #define SUN4I_TCON_GCTL_IOMAP_TCON0			(0 << 0)
@@ -229,7 +232,13 @@
 #define SUN4I_TCON1_FILL_BEG2_REG		0x31c
 #define SUN4I_TCON1_FILL_END2_REG		0x320
 #define SUN4I_TCON1_FILL_DATA2_REG		0x324
-#define SUN4I_TCON1_GAMMA_TABLE_REG		0x400
+
+#define SUN4I_TCON_GAMMA_TABLE_REG		0x400
+#define SUN4I_TCON_GAMMA_TABLE_B(x)		((x) & 0xff)
+#define SUN4I_TCON_GAMMA_TABLE_G(x)		(((x) & 0xff) << 8)
+#define SUN4I_TCON_GAMMA_TABLE_R(x)		(((x) & 0xff) << 16)
+
+#define SUN4I_TCON_GAMMA_LUT_SIZE		256
 
 #define SUN4I_TCON_MAX_CHANNELS		2
 
@@ -243,7 +252,11 @@ struct sun4i_tcon_quirks {
 	bool    needs_edp_reset; /* a80 edp reset needed for tcon0 access */
 	bool	supports_lvds;   /* Does the TCON support an LVDS output? */
 	bool	polarity_in_ch0; /* some tcon1 channels have polarity bits in tcon0 pol register */
+	bool	restores_rate;   /* restores the initial rate when rate changes */
+	bool	hdmi_pad;	/* h616 has to enable pad for HDMI */
 	u8	dclk_min_div;	/* minimum divider for TCON0 DCLK */
+	bool	vblank_delay;	/* delay page flip reporting for 250us (TCON report vblank
+				   shortly before register flip) */
 
 	/* callback to handle tcon muxing options */
 	int	(*set_mux)(struct sun4i_tcon *, const struct drm_encoder *);
@@ -281,11 +294,14 @@ struct sun4i_tcon {
 
 	/* Associated crtc */
 	struct sun4i_crtc		*crtc;
+	struct hrtimer			flip_timer;
 
 	int				id;
 
 	/* TCON list management */
 	struct list_head		list;
+
+	bool hw_preconfigured;
 };
 
 struct drm_bridge *sun4i_tcon_find_bridge(struct device_node *node);
@@ -297,7 +313,21 @@ void sun4i_tcon_mode_set(struct sun4i_tcon *tcon,
 			 const struct drm_display_mode *mode);
 void sun4i_tcon_set_status(struct sun4i_tcon *crtc,
 			   const struct drm_encoder *encoder, bool enable);
+void sun4i_tcon_load_gamma_lut(struct sun4i_tcon *tcon,
+			       struct drm_color_lut *lut);
+void sun4i_tcon_enable_gamma(struct sun4i_tcon *tcon, bool enable);
 
 extern const struct of_device_id sun4i_tcon_of_table[];
+
+struct sun4i_rate_reset_nb {
+	struct notifier_block	clk_nb;
+	struct delayed_work	reset_rate_work;
+
+	struct clk		*target_clk;
+	unsigned long		saved_rate;
+	bool			is_registered;
+};
+
+#define to_sun4i_rate_reset_nb(_nb) container_of(_nb, struct sun4i_rate_reset_nb, clk_nb)
 
 #endif /* __SUN4I_TCON_H__ */

@@ -202,6 +202,8 @@ struct rkisp1_sensor_async {
  * @sd: v4l2_subdev variable
  * @pads: media pads
  * @source: source in-use, set when starting streaming
+ * @active: the receiver is started and its registers may be written;
+ *	    changes under rkisp1_device.addata.lock
  */
 struct rkisp1_csi {
 	struct rkisp1_device *rkisp1;
@@ -210,6 +212,7 @@ struct rkisp1_csi {
 	struct v4l2_subdev sd;
 	struct media_pad pads[RKISP1_CSI_PAD_NUM];
 	struct v4l2_subdev *source;
+	bool active;
 };
 
 /*
@@ -376,6 +379,62 @@ struct rkisp1_stats {
 	struct v4l2_format vdev_fmt;
 };
 
+/*
+ * struct rkisp1_addata - MIPI additional-data capture device
+ *
+ * Captures CSI-2 long packets matched by the MIPI receiver's four
+ * additional-data (VC, DT) selectors. The FIFO has no DMA; it is drained
+ * from the shared hard interrupt, one register read per 4 bytes, spread
+ * across the frame by the fill-level interrupt.
+ *
+ * @vnode:	video node
+ * @rkisp1:	pointer to the rkisp1 device
+ * @lock:	protects everything below, plus rkisp1_csi.active and the
+ *		ADD_DATA_SEL registers
+ * @timer:	periodic drain while capturing; the FIFO's own fill-level
+ *		interrupt is deliberately not used, see rkisp1-addata.c
+ * @buf_queue:	queued empty buffers
+ * @streaming:	the video node is streaming; while also csi.active, the
+ *		selectors are programmed and captures are delivered
+ * @buffersize:	current per-frame capture limit (fmt.meta.buffersize)
+ * @sel:	selector values from the sensor's frame descriptor (or the
+ *		add_data_dt override), in register encoding
+ * @num_sel:	selectors in @sel
+ *
+ * State of the frame being captured, touched only in the ISR:
+ *
+ * @curr:	buffer being filled, NULL outside a capture
+ * @curr_hdr:	its rkisp1_addata_hdr (buffer start)
+ * @curr_data:	its payload area (right after the header)
+ * @curr_len:	payload bytes written so far
+ * @curr_flags:	RKISP1_ADDATA_FLAG_* accumulated for this frame
+ * @curr_dropped: payload bytes dropped for this frame
+ * @curr_sequence: ISP frame number latched when the capture opened
+ * @frame_nobuf: no buffer was available when this frame's data arrived;
+ *		 drop the rest of the frame instead of delivering a tail
+ */
+struct rkisp1_addata {
+	struct rkisp1_vdev_node vnode;
+	struct rkisp1_device *rkisp1;
+
+	spinlock_t lock;
+	struct hrtimer timer;
+	struct list_head buf_queue;
+	bool streaming;
+	u32 buffersize;
+	u32 sel[4];
+	unsigned int num_sel;
+
+	struct rkisp1_buffer *curr;
+	struct rkisp1_addata_hdr *curr_hdr;
+	u8 *curr_data;
+	u32 curr_len;
+	u32 curr_flags;
+	u32 curr_dropped;
+	u32 curr_sequence;
+	bool frame_nobuf;
+};
+
 struct rkisp1_params;
 struct rkisp1_params_ops {
 	void (*lsc_matrix_config)(struct rkisp1_params *params,
@@ -480,6 +539,13 @@ struct rkisp1_debug {
 	unsigned long stop_timeout[2];
 	unsigned long frame_drop[2];
 	unsigned long complete_frames;
+	unsigned long addata_frames;
+	unsigned long addata_bytes;
+	unsigned long addata_dropped;
+	unsigned long addata_overflow;
+	unsigned long addata_nobuf;
+	unsigned long addata_budget;
+	unsigned long addata_last_id;
 };
 
 /*
@@ -527,12 +593,15 @@ struct rkisp1_device {
 	struct rkisp1_capture capture_devs[2];
 	struct rkisp1_stats stats;
 	struct rkisp1_params params;
+	struct rkisp1_addata addata;
 	struct media_pipeline pipe;
 	struct mutex stream_lock; /* serialize {start/stop}_streaming cb between capture devices */
 	struct rkisp1_debug debug;
 	const struct rkisp1_info *info;
 	int irqs[RKISP1_NUM_IRQS];
 	bool irqs_enabled;
+	struct regmap *qos[2];
+	unsigned int qos_count;
 };
 
 /*
@@ -681,6 +750,20 @@ void rkisp1_resizer_devs_unregister(struct rkisp1_device *rkisp1);
 
 int rkisp1_stats_register(struct rkisp1_device *rkisp1);
 void rkisp1_stats_unregister(struct rkisp1_device *rkisp1);
+
+/*
+ * MIPI additional-data capture. The _csi_start/_csi_stop hooks are called by
+ * the CSI receiver around its own start/stop, with the hardware powered:
+ * start programs the (VC, DT) selectors from @source's frame descriptor and
+ * flushes the FIFO, stop parks the selectors and fails a capture in flight.
+ */
+int rkisp1_addata_register(struct rkisp1_device *rkisp1);
+void rkisp1_addata_unregister(struct rkisp1_device *rkisp1);
+void rkisp1_addata_csi_start(struct rkisp1_device *rkisp1,
+			     struct v4l2_subdev *source, unsigned int pad,
+			     u32 image_dt);
+void rkisp1_addata_csi_stop(struct rkisp1_device *rkisp1);
+void rkisp1_addata_isr(struct rkisp1_device *rkisp1, u32 status);
 
 int rkisp1_params_register(struct rkisp1_device *rkisp1);
 void rkisp1_params_unregister(struct rkisp1_device *rkisp1);

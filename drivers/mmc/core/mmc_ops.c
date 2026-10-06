@@ -472,7 +472,8 @@ static int mmc_busy_cb(void *cb_data, bool *busy)
 	u32 status = 0;
 	int err;
 
-	if (data->busy_cmd != MMC_BUSY_IO && host->ops->card_busy) {
+	if (data->busy_cmd != MMC_BUSY_IO && data->busy_cmd != MMC_BUSY_ERASE &&
+	    host->ops->card_busy) {
 		*busy = host->ops->card_busy(host);
 		return 0;
 	}

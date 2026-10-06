@@ -113,6 +113,35 @@ static inline void unmap_dma_buffer(struct musb_request *request,
 	request->map_state = UN_MAPPED;
 }
 
+static void rxstate(struct musb *musb, struct musb_request *req, bool defer_gb);
+
+/*
+ * Run a request's completion: unmap and hand it back to the gadget driver.
+ * The request must already be off ep->req_list.  Drops and retakes the lock
+ * around usb_gadget_giveback_request().
+ *
+ * Context: controller locked, IRQs blocked.
+ */
+static void musb_g_complete(struct musb_request *req)
+__releases(req->musb->lock)
+__acquires(req->musb->lock)
+{
+	struct musb_ep		*ep = req->ep;
+	struct musb		*musb = req->musb;
+	int			busy = ep->busy;
+
+	ep->busy = 1;
+	spin_unlock(&musb->lock);
+
+	if (!dma_mapping_error(&musb->g.dev, req->request.dma))
+		unmap_dma_buffer(req, musb);
+
+	trace_musb_req_gb(req);
+	usb_gadget_giveback_request(&ep->end_point, &req->request);
+	spin_lock(&musb->lock);
+	ep->busy = busy;
+}
+
 /*
  * Immediately complete a request.
  *
@@ -127,27 +156,81 @@ void musb_g_giveback(
 __releases(ep->musb->lock)
 __acquires(ep->musb->lock)
 {
-	struct musb_request	*req;
-	struct musb		*musb;
-	int			busy = ep->busy;
-
-	req = to_musb_request(request);
+	struct musb_request	*req = to_musb_request(request);
 
 	list_del(&req->list);
 	if (req->request.status == -EINPROGRESS)
 		req->request.status = status;
-	musb = req->musb;
 
-	ep->busy = 1;
-	spin_unlock(&musb->lock);
+	musb_g_complete(req);
+}
 
-	if (!dma_mapping_error(&musb->g.dev, request->dma))
-		unmap_dma_buffer(req, musb);
+/*
+ * Defer a request's completion to the gb_tasklet (softirq context).
+ *
+ * usb_ep_ops->queue() and ->set_halt() must not run the gadget's completion
+ * callback synchronously on the caller's stack; rxstate() uses this when it
+ * finishes a PIO request from those (kick) paths.  The request is taken off
+ * ep->req_list now (so the RX IRQ does not re-process or re-complete it) and
+ * parked on musb->gb_list, reusing its list node, until the tasklet runs.
+ *
+ * Context: controller locked, IRQs blocked.
+ */
+static void musb_g_defer_giveback(struct musb_ep *ep,
+				  struct usb_request *request, int status)
+{
+	struct musb_request	*req = to_musb_request(request);
 
-	trace_musb_req_gb(req);
-	usb_gadget_giveback_request(&req->ep->end_point, &req->request);
-	spin_lock(&musb->lock);
-	ep->busy = busy;
+	list_del(&req->list);
+	if (req->request.status == -EINPROGRESS)
+		req->request.status = status;
+
+	list_add_tail(&req->list, &ep->musb->gb_list);
+	tasklet_schedule(&ep->musb->gb_tasklet);
+}
+
+/*
+ * Tasklet that runs deferred request completions off the queue()/set_halt()
+ * stacks.  Softirq context, where the IRQ-driven completions effectively run
+ * too.
+ *
+ * After each completion we mirror musb_g_rx(): re-select the endpoint and run
+ * rxstate() on its new head.  The gadget's ->complete() typically re-queues an
+ * OUT request, but it does so while ep->busy is set (around the giveback) so
+ * musb_gadget_queue() does not kick it; without this re-arm a packet the host
+ * already left in the RX FIFO (ring briefly empty, so the IRQ found no request
+ * and no further IRQ will come) would never be drained and the host's transfer
+ * would hang.  Touching registers here is safe: the kick/re-queue just bumped
+ * runtime-PM with a 500ms autosuspend delay, so the device is still resumed.
+ * Completions from the re-arm land back on gb_list and are drained by the loop.
+ */
+static void musb_g_giveback_tasklet(struct tasklet_struct *t)
+{
+	struct musb		*musb = container_of(t, struct musb, gb_tasklet);
+	struct musb_request	*req, *next;
+	struct musb_ep		*ep;
+	u8			epnum;
+	unsigned long		flags;
+
+	spin_lock_irqsave(&musb->lock, flags);
+	while (!list_empty(&musb->gb_list)) {
+		req = list_first_entry(&musb->gb_list, struct musb_request,
+				       list);
+		list_del(&req->list);
+		ep = req->ep;
+		epnum = req->epnum;
+
+		musb_g_complete(req);
+
+		/* re-arm the (possibly re-queued) head; drain a stranded packet */
+		if (ep->desc && !ep->busy) {
+			musb_ep_select(musb->mregs, epnum);
+			next = next_request(ep);
+			if (next && !next->tx)
+				rxstate(musb, next, true);
+		}
+	}
+	spin_unlock_irqrestore(&musb->lock, flags);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -189,6 +272,25 @@ static void nuke(struct musb_ep *ep, const int status)
 		musb_dbg(musb, "%s: abort DMA --> %d", ep->name, value);
 		c->channel_release(ep->dma);
 		ep->dma = NULL;
+	}
+
+	/*
+	 * Also complete this ep's requests parked on musb->gb_list for
+	 * deferred giveback: they are off ep->req_list, but the API contract
+	 * is that all requests are completed before usb_ep_disable() returns
+	 * (gadget drivers free them right after), and a parked request left
+	 * behind would be completed by the gb_tasklet after it was freed.
+	 * musb_g_complete() drops the lock, so rescan after each giveback.
+	 */
+restart_gb_scan:
+	list_for_each_entry(req, &musb->gb_list, list) {
+		if (req->ep == ep) {
+			list_del(&req->list);
+			if (req->request.status == -EINPROGRESS)
+				req->request.status = status;
+			musb_g_complete(req);
+			goto restart_gb_scan;
+		}
 	}
 
 	while (!list_empty(&ep->req_list)) {
@@ -281,7 +383,7 @@ static void txstate(struct musb *musb, struct musb_request *req)
 
 		/* MUSB_TXCSR_P_ISO is still set correctly */
 
-		if (musb_dma_inventra(musb) || musb_dma_ux500(musb)) {
+		if (musb_dma_sw_mode_select(musb)) {
 			if (request_size < musb_ep->packet_sz)
 				musb_ep->dma->desired_mode = 0;
 			else
@@ -331,7 +433,7 @@ static void txstate(struct musb *musb, struct musb_request *req)
 			}
 		}
 
-		if (is_cppi_enabled(musb)) {
+		if (musb_dma_queue_autoadvance(musb)) {
 			/* program endpoint CSR first, then setup DMA */
 			csr &= ~(MUSB_TXCSR_P_UNDERRUN | MUSB_TXCSR_TXPKTRDY);
 			csr |= MUSB_TXCSR_DMAENAB | MUSB_TXCSR_DMAMODE |
@@ -367,7 +469,7 @@ static void txstate(struct musb *musb, struct musb_request *req)
 				musb_writew(epio, MUSB_TXCSR, csr);
 				/* invariant: prequest->buf is non-null */
 			}
-		} else if (tusb_dma_omap(musb))
+		} else if (musb_dma_engine_managed(musb))
 			use_dma = use_dma && c->channel_program(
 					musb_ep->dma, musb_ep->packet_sz,
 					request->zero,
@@ -516,7 +618,7 @@ void musb_g_tx(struct musb *musb, u8 epnum)
 /*
  * Context: controller locked, IRQs blocked, endpoint selected
  */
-static void rxstate(struct musb *musb, struct musb_request *req)
+static void rxstate(struct musb *musb, struct musb_request *req, bool defer_gb)
 {
 	const u8		epnum = req->epnum;
 	struct usb_request	*request = &req->request;
@@ -554,7 +656,7 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 		return;
 	}
 
-	if (is_cppi_enabled(musb) && is_buffer_mapped(req)) {
+	if (musb_dma_queue_autoadvance(musb) && is_buffer_mapped(req)) {
 		struct dma_controller	*c = musb->dma_controller;
 		struct dma_channel	*channel = musb_ep->dma;
 
@@ -588,9 +690,31 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 		 * Enable Mode 1 on RX transfers only when short_not_ok flag
 		 * is set. Currently short_not_ok flag is set only from
 		 * file_storage and f_mass_storage drivers
+		 *
+		 * The Allwinner A64 idma (MUSB_DMA_RX_MODE1_ALWAYS, sunxi only)
+		 * only works with the Mode 1 RXCSR setup: AUTOCLEAR | DMAENAB
+		 * with DMAMODE toggled, which matches the proven p-boot
+		 * sequence.  The Mode 0 setup leaves AUTOCLEAR clear and the
+		 * engine transfers nothing (completes with residual == len).
+		 * The engine pumps whole multi-packet buffers autonomously, so
+		 * use Mode 1 for any full-packet DMA-mapped transfer even when
+		 * the gadget function did not set short_not_ok.  This is gated
+		 * on the sunxi glue and does not affect the other Inventra
+		 * DMA engines.
+		 *
+		 * The idma cannot detect short packets and has no readable
+		 * transfer progress (BC and the address register read back
+		 * their programmed values), so an armed span must always
+		 * complete exactly -- a longer arm swallows the following
+		 * transfer's packets.  Hosts may end an OUT transfer short
+		 * at any point, so arm a single packet at a time; each arm
+		 * completes by construction and sub-packet tails go through
+		 * PIO.
 		 */
 
-		if (request->short_not_ok && fifo_count == musb_ep->packet_sz)
+		if (fifo_count == musb_ep->packet_sz &&
+		    (request->short_not_ok ||
+		     (musb_dma_rx_mode1_always(musb) && is_buffer_mapped(req))))
 			use_mode_1 = 1;
 		else
 			use_mode_1 = 0;
@@ -599,7 +723,8 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 			if (!is_buffer_mapped(req))
 				goto buffer_aint_mapped;
 
-			if (musb_dma_inventra(musb)) {
+			if (musb_dma_sw_mode_select(musb) &&
+			    !musb_dma_rx_mode_autoclear(musb)) {
 				struct dma_controller	*c;
 				struct dma_channel	*channel;
 				int			use_dma = 0;
@@ -649,6 +774,17 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 							request->length -
 							request->actual,
 							channel->max_len);
+
+					/*
+					 * Single-packet arms, see above;
+					 * short_not_ok transfers are exact
+					 * and keep the full-size arm.
+					 */
+					if (musb_dma_rx_mode1_always(musb) &&
+					    !request->short_not_ok)
+						transfer_size =
+							musb_ep->packet_sz;
+
 					musb_ep->dma->desired_mode = 1;
 				} else {
 					if (!musb_ep->hb_mult &&
@@ -674,7 +810,7 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 					return;
 			}
 
-			if ((musb_dma_ux500(musb)) &&
+			if (musb_dma_rx_mode_autoclear(musb) &&
 				(request->actual < request->length)) {
 
 				struct dma_controller *c;
@@ -731,7 +867,9 @@ static void rxstate(struct musb *musb, struct musb_request *req)
 
 			fifo_count = min_t(unsigned, len, fifo_count);
 
-			if (tusb_dma_omap(musb)) {
+			/* engine-managed, but not the autoadvancing queue (TUSB) */
+			if (musb_dma_engine_managed(musb) &&
+			    !musb_dma_queue_autoadvance(musb)) {
 				struct dma_controller *c = musb->dma_controller;
 				struct dma_channel *channel = musb_ep->dma;
 				u32 dma_addr = request->dma + request->actual;
@@ -781,8 +919,12 @@ buffer_aint_mapped:
 
 	/* reach the end or short packet detected */
 	if (request->actual == request->length ||
-	    fifo_count < musb_ep->packet_sz)
-		musb_g_giveback(musb_ep, request, 0);
+	    fifo_count < musb_ep->packet_sz) {
+		if (defer_gb)
+			musb_g_defer_giveback(musb_ep, request, 0);
+		else
+			musb_g_giveback(musb_ep, request, 0);
+	}
 }
 
 /*
@@ -841,9 +983,23 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 	}
 
 	if (dma_channel_status(dma) == MUSB_DMA_STATUS_BUSY) {
-		/* "should not happen"; likely RXPKTRDY pending for DMA */
-		musb_dbg(musb, "%s busy, csr %04x",
-			musb_ep->end_point.name, csr);
+		u16 count = musb_readw(epio, MUSB_RXCOUNT);
+
+		/*
+		 * On sunxi, endpoint interrupts fire for every received
+		 * packet while the channel runs (the DMAREQ latch toggle
+		 * leaves Mode 0 interrupt semantics; keeping DMAMODE set
+		 * does not suppress them), and RXCOUNT is only a live
+		 * snapshot of the packet being drained -- it cannot be used
+		 * to detect a pending short packet.  Armed transfers always
+		 * complete exactly (see rxstate()), so there is nothing to
+		 * service here.
+		 */
+		if ((csr & MUSB_RXCSR_RXPKTRDY) && count &&
+		    count < musb_ep->packet_sz)
+			musb_dbg(musb, "%s: short rx (%u) while DMA active, req %u/%u",
+				 musb_ep->end_point.name, count,
+				 request->actual, request->length);
 		return;
 	}
 
@@ -856,31 +1012,31 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 
 		request->actual += musb_ep->dma->actual_len;
 
-#if defined(CONFIG_USB_INVENTRA_DMA) || defined(CONFIG_USB_TUSB_OMAP_DMA) || \
-	defined(CONFIG_USB_UX500_DMA)
-		/* Autoclear doesn't clear RxPktRdy for short packets */
-		if ((dma->desired_mode == 0 && !hw_ep->rx_double_buffered)
-				|| (dma->actual_len
-					& (musb_ep->packet_sz - 1))) {
-			/* ack the read! */
-			csr &= ~MUSB_RXCSR_RXPKTRDY;
-			musb_writew(epio, MUSB_RXCSR, csr);
-		}
+		/* the autoadvancing-queue engine (CPPI) acks short RX in HW */
+		if (!musb_dma_queue_autoadvance(musb)) {
+			/* Autoclear doesn't clear RxPktRdy for short packets */
+			if ((dma->desired_mode == 0 && !hw_ep->rx_double_buffered)
+					|| (dma->actual_len
+						& (musb_ep->packet_sz - 1))) {
+				/* ack the read! */
+				csr &= ~MUSB_RXCSR_RXPKTRDY;
+				musb_writew(epio, MUSB_RXCSR, csr);
+			}
 
-		/* incomplete, and not short? wait for next IN packet */
-		if ((request->actual < request->length)
-				&& (musb_ep->dma->actual_len
-					== musb_ep->packet_sz)) {
-			/* In double buffer case, continue to unload fifo if
- 			 * there is Rx packet in FIFO.
- 			 **/
-			csr = musb_readw(epio, MUSB_RXCSR);
-			if ((csr & MUSB_RXCSR_RXPKTRDY) &&
-				hw_ep->rx_double_buffered)
-				goto exit;
-			return;
+			/* incomplete, and not short? wait for next IN packet */
+			if ((request->actual < request->length)
+					&& (musb_ep->dma->actual_len
+						== musb_ep->packet_sz)) {
+				/* In double buffer case, continue to unload fifo if
+				 * there is Rx packet in FIFO.
+				 **/
+				csr = musb_readw(epio, MUSB_RXCSR);
+				if ((csr & MUSB_RXCSR_RXPKTRDY) &&
+					hw_ep->rx_double_buffered)
+					goto exit;
+				return;
+			}
 		}
-#endif
 		musb_g_giveback(musb_ep, request, 0);
 		/*
 		 * In the giveback function the MUSB lock is
@@ -896,12 +1052,9 @@ void musb_g_rx(struct musb *musb, u8 epnum)
 		if (!req)
 			return;
 	}
-#if defined(CONFIG_USB_INVENTRA_DMA) || defined(CONFIG_USB_TUSB_OMAP_DMA) || \
-	defined(CONFIG_USB_UX500_DMA)
 exit:
-#endif
 	/* Analyze request */
-	rxstate(musb, req);
+	rxstate(musb, req, false);
 }
 
 /* ------------------------------------------------------------ */
@@ -1162,19 +1315,26 @@ void musb_free_request(struct usb_ep *ep, struct usb_request *req)
  */
 void musb_ep_restart(struct musb *musb, struct musb_request *req)
 {
-	u16 csr;
-	void __iomem *epio = req->ep->hw_ep->regs;
-
 	trace_musb_req_start(req);
 	musb_ep_select(musb->mregs, req->epnum);
-	if (req->tx) {
+	if (req->tx)
 		txstate(musb, req);
-	} else {
-		csr = musb_readw(epio, MUSB_RXCSR);
-		csr |= MUSB_RXCSR_FLUSHFIFO | MUSB_RXCSR_P_WZC_BITS;
-		musb_writew(epio, MUSB_RXCSR, csr);
-		musb_writew(epio, MUSB_RXCSR, csr);
-	}
+	else
+		/*
+		 * Drain any packet the host already delivered into the RX
+		 * FIFO before this request was queued.  Do NOT flush here:
+		 * f_mass_storage routinely pipelines the next 31-byte CBW
+		 * before its thread re-queues the bulk-OUT request, so a
+		 * flush silently discards a valid CBW and wedges the link
+		 * (spurious RXCSR / zero-length CBW / host reset).
+		 *
+		 * Pass defer_giveback=true: rxstate() may complete a PIO
+		 * short packet here, and usb_ep_ops->queue() (and ->set_halt,
+		 * our other caller) must not run the gadget's completion
+		 * synchronously on the caller's stack.  DMA arming still
+		 * happens inline; only the terminal giveback is deferred.
+		 */
+		rxstate(musb, req, true);
 }
 
 static int musb_ep_restart_resume_work(struct musb *musb, void *data)
@@ -1284,6 +1444,19 @@ static int musb_gadget_dequeue(struct usb_ep *ep, struct usb_request *request)
 			break;
 	}
 	if (r != req) {
+		/*
+		 * The request may be parked on musb->gb_list for deferred
+		 * giveback.  Callers rely on the completion having run by
+		 * the time dequeue returns, so run it now instead of
+		 * failing.
+		 */
+		list_for_each_entry(r, &musb->gb_list, list) {
+			if (r == req) {
+				list_del(&r->list);
+				musb_g_complete(r);
+				goto done;
+			}
+		}
 		dev_err(musb->controller, "request %p not queued to %s\n",
 				request, ep->name);
 		status = -EINVAL;
@@ -1787,6 +1960,8 @@ int musb_gadget_setup(struct musb *musb)
 	/* don't support otg protocols */
 	musb->g.is_otg = 0;
 	INIT_DELAYED_WORK(&musb->gadget_work, musb_gadget_work);
+	tasklet_setup(&musb->gb_tasklet, musb_g_giveback_tasklet);
+	INIT_LIST_HEAD(&musb->gb_list);
 	musb_g_init_endpoints(musb);
 
 	musb->is_active = 0;
@@ -1904,6 +2079,14 @@ static int musb_gadget_stop(struct usb_gadget *g)
 	musb->gadget_driver = NULL;
 	musb_platform_try_idle(musb, 0);
 	spin_unlock_irqrestore(&musb->lock, flags);
+
+	/*
+	 * Deliver any deferred request completions before the driver
+	 * detaches.  RX is stopped above, so no new ones can be queued;
+	 * tasklet_kill() lets a scheduled tasklet run to completion (handing
+	 * back any parked requests) before returning, so nothing is leaked.
+	 */
+	tasklet_kill(&musb->gb_tasklet);
 
 	/*
 	 * FIXME we need to be able to register another

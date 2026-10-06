@@ -16,6 +16,7 @@
 		ethernet0 = &gmac0;
 		ethernet1 = &gmac1;
 		serial0 = &uart0;
+		serial1 = &uart1;
 	};
 
 	chosen {
@@ -46,6 +47,21 @@
 			      <&axp717_adc 4>; /* pmic_temp */
 	};
 
+	reg_3v3_wifi: 3v3-wifi {
+		compatible = "regulator-fixed";
+		regulator-name = "3v3-wifi";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		gpio = <&r_pio 0 7 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&r_pio 1 1 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <200>;
+	};
+
 	reg_vcc5v: vcc5v {
 		/* board wide 5V supply from the USB-C connector */
 		compatible = "regulator-fixed";
@@ -62,6 +78,39 @@
 		regulator-max-microvolt = <5000000>;
 		vin-supply = <&reg_vcc5v>;
 		gpio = <&r_pio 0 8 GPIO_ACTIVE_HIGH>;	/* PL8 */
+		enable-active-high;
+	};
+
+	reg_pcie_vcc3v3: regulator-pcie-vcc3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "pcie-3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-enable-ramp-delay = <1000>;
+		regulator-always-on;
+		regulator-boot-on;
+		gpio = <&r_pio 0 11 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+
+	gma340_oe: gma340-oe {
+		compatible = "regulator-fixed";
+		regulator-name = "gma340-oe";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+		gpio = <&pio 1 7 GPIO_ACTIVE_LOW>;
+	};
+
+	gma340_pcie: gma340-pcie {
+		compatible = "regulator-fixed";
+		regulator-name = "gma340-pcie";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+		gpio = <&pio 1 6 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 	};
 };
@@ -126,6 +175,25 @@
 	cd-gpios = <&pio 5 6 (GPIO_ACTIVE_LOW | GPIO_PULL_UP)>; /* PF6 */
 	bus-width = <4>;
 	status = "okay";
+};
+
+&mmc1 {
+	bus-width = <4>;
+	max-frequency = <40000000>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+	non-removable;
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc1_pins>;
+	vmmc-supply = <&reg_3v3_wifi>;
+	vqmmc-supply = <&reg_bldo1>;
+	status = "okay";
+
+	wifi@1 {
+		reg = <1>;
+		interrupt-parent = <&r_pio>;
+		interrupts = <1 0 IRQ_TYPE_LEVEL_LOW>;
+		interrupt-names = "host-wake";
+	};
 };
 
 &ohci0 {
@@ -228,6 +296,7 @@
 			};
 
 			reg_bldo1: bldo1 {
+				regulator-always-on;
 				regulator-min-microvolt = <1800000>;
 				regulator-max-microvolt = <1800000>;
 				regulator-name = "vcc-pg-iowifi";
@@ -350,6 +419,20 @@
 	status = "okay";
 };
 
+&uart1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pins>, <&uart1_rts_cts_pins>;
+	uart-has-rtscts;
+	status = "okay";
+
+	bluetooth {
+		/* aic8800-bt */
+		shutdown-gpios = <&r_pio 1 2 GPIO_ACTIVE_LOW>;
+		host-wakeup-gpios = <&r_pio 1 4 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&r_pio 1 3 GPIO_ACTIVE_HIGH>;
+	};
+};
+
 &usb_otg {
 	/*
 	 * The USB-C port is the primary power supply, so in this configuration
@@ -381,3 +464,28 @@
 	usb1_vbus-supply = <&reg_usb_vbus>;
 	status = "okay";
 };
+
+/* PCIE and USB Switch */
+&combophy {
+	resets = <&ccu RST_BUS_PCIE_USB3>;
+	phy_use_sel = <0>; /* 0:PCIE; 1:USB3 */
+	status = "okay";
+};
+
+&pcie {
+	reset-gpios = <&pio 7 11 GPIO_ACTIVE_HIGH>;
+	wake-gpios = <&pio 7 12 GPIO_ACTIVE_HIGH>;
+	num-lanes  = <1>;
+	clk-freq-100M;
+	pcie3v3-supply = <&reg_pcie_vcc3v3>;
+	status = "okay";
+};
+
+&usbc1 {
+	device_type = "usbc1";
+	usb_regulator_io = "nocare";
+	usb_wakeup_suspend = <1>;
+	wakeup-source;
+	status = "okay";
+};
+

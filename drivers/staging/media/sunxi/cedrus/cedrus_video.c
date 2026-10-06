@@ -56,6 +56,22 @@ static struct cedrus_format cedrus_formats[] = {
 		.capabilities	= CEDRUS_CAPABILITY_VP8_DEC,
 	},
 	{
+		.pixelformat	= V4L2_PIX_FMT_YUV420_10_AFBC_16X16_SPLIT,
+		.directions	= CEDRUS_DECODE_DST,
+		.capabilities	= CEDRUS_CAPABILITY_UNTILED |
+				  CEDRUS_CAPABILITY_H265_10_DEC,
+		.depth		= 10,
+		.src_format	= V4L2_PIX_FMT_HEVC_SLICE,
+	},
+	{
+		.pixelformat	= V4L2_PIX_FMT_YUV420_8_AFBC_16X16_SPLIT,
+		.directions	= CEDRUS_DECODE_DST,
+		.capabilities	= CEDRUS_CAPABILITY_UNTILED |
+				  CEDRUS_CAPABILITY_H265_10_DEC,
+		.depth		= 8,
+		.src_format	= V4L2_PIX_FMT_HEVC_SLICE,
+	},
+	{
 		.pixelformat	= V4L2_PIX_FMT_NV12,
 		.directions	= CEDRUS_DECODE_DST,
 		.capabilities	= CEDRUS_CAPABILITY_UNTILED,
@@ -95,6 +111,13 @@ static struct cedrus_format *cedrus_find_format(struct cedrus_ctx *ctx,
 
 		if (!cedrus_is_capable(ctx, fmt->capabilities) ||
 		    !(fmt->directions & directions))
+			continue;
+
+		if (fmt->depth && fmt->depth != ctx->bit_depth)
+			continue;
+
+		if (fmt->src_format &&
+		    fmt->src_format != ctx->src_fmt.pixelformat)
 			continue;
 
 		if (fmt->pixelformat == pixelformat)
@@ -164,6 +187,26 @@ void cedrus_prepare_format(struct v4l2_pix_format *pix_fmt)
 
 		/* Chroma plane size. */
 		sizeimage += bytesperline * height / 2;
+
+		break;
+
+	case V4L2_PIX_FMT_YUV420_10_AFBC_16X16_SPLIT:
+		/* Zero bytes per line for compressed destination. */
+		bytesperline = 0;
+
+		sizeimage = DIV_ROUND_UP(width, 16) *
+			    DIV_ROUND_UP(height + 4, 16) * (512 + 16) +
+			    32 + SZ_1K;
+
+		break;
+
+	case V4L2_PIX_FMT_YUV420_8_AFBC_16X16_SPLIT:
+		/* Zero bytes per line for compressed destination. */
+		bytesperline = 0;
+
+		sizeimage = DIV_ROUND_UP(width, 16) *
+			    DIV_ROUND_UP(height + 4, 16) * (384 + 16) +
+			    32 + SZ_1K;
 
 		break;
 	}
@@ -593,6 +636,7 @@ int cedrus_queue_init(void *priv, struct vb2_queue *src_vq,
 
 	src_vq->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
 	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
+	src_vq->dma_attrs = DMA_ATTR_NO_KERNEL_MAPPING;
 	src_vq->drv_priv = ctx;
 	src_vq->buf_struct_size = sizeof(struct cedrus_buffer);
 	src_vq->ops = &cedrus_qops;

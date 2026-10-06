@@ -188,7 +188,7 @@ static int sun4i_prepare_for_irq(struct iio_dev *indio_dev, int channel,
 		 */
 		if ((reg & info->data->adc_chan_mask) !=
 			 info->data->adc_chan_select(channel))
-			mdelay(10);
+			usleep_range(10000, 11000);
 
 	} else {
 		/*
@@ -206,8 +206,9 @@ static int sun4i_prepare_for_irq(struct iio_dev *indio_dev, int channel,
 	 * When the IP changes mode between ADC or touchscreen, it
 	 * needs a bit of time to get correct values.
 	 */
-	if ((reg & info->data->tp_adc_select) != info->data->tp_adc_select)
-		mdelay(100);
+	if (!!(reg & info->data->tp_adc_select) !=
+	    (irq == info->fifo_data_irq))
+		msleep(100);
 
 	return 0;
 }
@@ -615,7 +616,8 @@ static int sun4i_gpadc_probe(struct platform_device *pdev)
 	indio_dev->info = &sun4i_gpadc_iio_info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
-	if (pdev->dev.of_node)
+	if (pdev->dev.of_node && of_match_node(sun4i_gpadc_of_id,
+					       pdev->dev.of_node))
 		ret = sun4i_gpadc_probe_dt(pdev, indio_dev);
 	else
 		ret = sun4i_gpadc_probe_mfd(pdev, indio_dev);

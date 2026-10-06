@@ -7,6 +7,8 @@
 #define _DT_BINDINGS_CLK_SUN50I_H616_H_
 
 #define CLK_PLL_PERIPH0		4
+#define CLK_PLL_AUDIO_HS	17
+#define CLK_PLL_AUDIO_4X	20
 
 #define CLK_CPUX		21
 

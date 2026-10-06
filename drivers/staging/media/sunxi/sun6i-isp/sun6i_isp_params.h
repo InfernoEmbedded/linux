@@ -20,7 +20,12 @@ struct sun6i_isp_params_state {
 	struct sun6i_isp_buffer		*pending;
 
 	bool				configured;
+	/* what the modules above were configured for */
+	bool				configured_bayer;
 	bool				streaming;
+
+	/* Table update bits owed to FE_CTRL, applied at the next sync. */
+	u32				table_update;
 };
 
 struct sun6i_isp_params {
@@ -37,6 +42,7 @@ struct sun6i_isp_params {
 /* Params */
 
 void sun6i_isp_params_configure(struct sun6i_isp_device *isp_dev);
+u32 sun6i_isp_params_table_update_take(struct sun6i_isp_device *isp_dev);
 
 /* State */
 

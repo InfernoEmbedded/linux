@@ -8,6 +8,7 @@
 #include <linux/bitops.h>
 #include <linux/clk.h>
 #include <linux/dma-mapping.h>
+#include <linux/dma/sun4i-dma.h>
 #include <linux/dmaengine.h>
 #include <linux/dmapool.h>
 #include <linux/interrupt.h>
@@ -88,11 +89,7 @@
 #define SUN4I_DDMA_CFG_BYTE_COUNT_MODE_REMAIN	BIT(15)
 #define SUN4I_DDMA_CFG_SRC_NON_SECURE		BIT(12)
 
-/* Dedicated DMA parameter register layout */
-#define SUN4I_DDMA_PARA_DST_DATA_BLK_SIZE(n)	(((n) - 1) << 24)
-#define SUN4I_DDMA_PARA_DST_WAIT_CYCLES(n)	(((n) - 1) << 16)
-#define SUN4I_DDMA_PARA_SRC_DATA_BLK_SIZE(n)	(((n) - 1) << 8)
-#define SUN4I_DDMA_PARA_SRC_WAIT_CYCLES(n)	(((n) - 1) << 0)
+/* The dedicated DMA parameter register layout is in linux/dma/sun4i-dma.h */
 
 /** DMA register offsets **/
 
@@ -923,6 +920,20 @@ sun4i_dma_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
 			    SUN4I_DMA_CFG_SRC_DRQ_TYPE(vchan->endpoint) |
 			    SUN4I_DMA_CFG_SRC_ADDR_MODE(io_mode);
 
+	/*
+	 * Use the client's dedicated DMA timing parameters when it provided
+	 * some, otherwise fall back to the magic timings that were found
+	 * experimentally with SPI and seem to work for most devices.  As
+	 * usual, we only have the "para" bitfield meanings, but no comment
+	 * on what the values should be when doing a certain operation :|
+	 */
+	if (sconfig->peripheral_config &&
+	    sconfig->peripheral_size == sizeof(struct sun4i_dma_chan_config))
+		para = ((struct sun4i_dma_chan_config *)
+				sconfig->peripheral_config)->para;
+	else
+		para = SUN4I_DDMA_MAGIC_SPI_PARAMETERS;
+
 	for_each_sg(sgl, sg, sg_len, i) {
 		/* Figure out addresses */
 		if (dir == DMA_MEM_TO_DEV) {
@@ -932,17 +943,6 @@ sun4i_dma_prep_slave_sg(struct dma_chan *chan, struct scatterlist *sgl,
 			srcaddr = sconfig->src_addr;
 			dstaddr = sg_dma_address(sg);
 		}
-
-		/*
-		 * These are the magic DMA engine timings that keep SPI going.
-		 * I haven't seen any interface on DMAEngine to configure
-		 * timings, and so far they seem to work for everything we
-		 * support, so I've kept them here. I don't know if other
-		 * devices need different timings because, as usual, we only
-		 * have the "para" bitfield meanings, but no comment on what
-		 * the values should be when doing a certain operation :|
-		 */
-		para = SUN4I_DDMA_MAGIC_SPI_PARAMETERS;
 
 		/* And make a suitable promise */
 		if (vchan->is_dedicated)

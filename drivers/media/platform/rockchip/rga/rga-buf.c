@@ -26,8 +26,13 @@ static ssize_t fill_descriptors(struct rga_dma_desc *desc, size_t max_desc,
 	dma_addr_t addr;
 
 	for_each_sgtable_dma_page(sgt, &iter, 0) {
-		if (n_desc > max_desc)
-			return -EINVAL;
+		/*
+		 * Imported buffers may be larger than the frame (decoders
+		 * append auxiliary data after the image); only the frame
+		 * itself is mapped for the RGA.
+		 */
+		if (n_desc >= max_desc)
+			break;
 		addr = sg_page_iter_dma_address(&iter);
 		tmp->addr = lower_32_bits(addr);
 		tmp++;

@@ -47,6 +47,14 @@ struct sun6i_isp_proc {
 
 	struct sun6i_isp_proc_source	source_csi0;
 	struct sun6i_isp_proc_source	source_csi1;
+
+	/*
+	 * The source the pipeline was started against, so that it can be
+	 * stopped and started again without going back through the graph.
+	 * NULL while stopped.
+	 */
+	struct sun6i_isp_proc_source	*source_active;
+	struct v4l2_subdev		*source_subdev_active;
 };
 
 /* Helpers */
@@ -57,6 +65,13 @@ void sun6i_isp_proc_dimensions(struct sun6i_isp_device *isp_dev,
 /* Format */
 
 const struct sun6i_isp_proc_format *sun6i_isp_proc_format_find(u32 mbus_code);
+bool sun6i_isp_proc_bayer(struct sun6i_isp_device *isp_dev);
+
+/* Frontend */
+
+void sun6i_isp_proc_configure(struct sun6i_isp_device *isp_dev);
+int sun6i_isp_proc_start(struct sun6i_isp_device *isp_dev);
+void sun6i_isp_proc_stop(struct sun6i_isp_device *isp_dev);
 
 /* Proc */
 

@@ -3,3 +3,7 @@ obj-$(CONFIG_PHY_SUN4I_USB)		+= phy-sun4i-usb.o
 obj-$(CONFIG_PHY_SUN6I_MIPI_DPHY)	+= phy-sun6i-mipi-dphy.o
 obj-$(CONFIG_PHY_SUN9I_USB)		+= phy-sun9i-usb.o
 obj-$(CONFIG_PHY_SUN50I_USB3)		+= phy-sun50i-usb3.o
+obj-$(CONFIG_AC200_PHY_CTL)		+= ac200-ephy-ctl.o
+obj-$(CONFIG_AW_INNO_COMBOPHY)	+= sunxi-inno-combophy.o
+obj-$(CONFIG_AW_CADENCE_COMBOPHY)	+= sunxi-cadence-combophy.o
+obj-$(CONFIG_PHY_SUNXI_PLAT)		+= phy-sunxi-plat.o

@@ -283,7 +283,7 @@ static int omap2430_musb_exit(struct musb *musb)
 }
 
 static const struct musb_platform_ops omap2430_ops = {
-	.quirks		= MUSB_DMA_INVENTRA,
+	.quirks		= MUSB_DMA_SW_MODE_SELECT,
 #ifdef CONFIG_USB_INVENTRA_DMA
 	.dma_init	= musbhs_dma_controller_create,
 	.dma_exit	= musbhs_dma_controller_destroy,

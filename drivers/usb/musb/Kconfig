@@ -150,6 +150,29 @@ config USB_INVENTRA_DMA
 	help
 	  Enable DMA transfers using Mentor's engine.
 
+config USB_SUNXI_IDMA
+	bool 'Allwinner USB-OTG internal DMA'
+	depends on USB_MUSB_SUNXI
+	help
+	  Enable the Allwinner USB-OTG "internal DMA" engine, a vendor
+	  extension living in the USB controller's own register window.
+	  It is not Mentor's engine, but it is driven through the same
+	  software mode-select CSR paths.
+
+	  The A83T, H3/H5 and A64 are supported; other sunxi SoCs fall
+	  back to PIO.
+
+config USB_SUNXI_DDMA
+	bool 'Allwinner USB-OTG system DMA'
+	depends on USB_MUSB_SUNXI
+	depends on DMA_SUN4I
+	help
+	  Enable USB-OTG DMA transfers through the SoC's dedicated DMA
+	  engine on Allwinner SoCs whose USB controller has no DMA
+	  engine of its own.
+
+	  Only the A13 is supported; other sunxi SoCs fall back to PIO.
+
 config USB_TI_CPPI41_DMA
 	bool 'TI CPPI 4.1'
 	depends on (ARCH_OMAP || ARCH_DAVINCI_DA8XX) && DMADEVICES

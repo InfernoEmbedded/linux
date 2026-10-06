@@ -31,6 +31,7 @@
 #include <linux/reset.h>
 #include <linux/spinlock.h>
 #include <linux/usb/of.h>
+#include <linux/usb/role.h>
 #include <linux/workqueue.h>
 
 #define REG_ISCR			0x00
@@ -139,6 +140,9 @@ struct sun4i_usb_phy_data {
 	int id_det;
 	int vbus_det;
 	struct delayed_work detect;
+	struct usb_role_switch_desc switch_desc;
+	struct usb_role_switch *role_switch;
+	int usb_role;
 };
 
 #define to_sun4i_usb_phy_data(phy) \
@@ -236,6 +240,7 @@ static void sun4i_usb_phy_passby(struct sun4i_usb_phy *phy, int enable)
 
 	bits = SUNXI_AHB_ICHR8_EN | SUNXI_AHB_INCR4_BURST_EN |
 		SUNXI_AHB_INCRX_ALIGN_EN | SUNXI_ULPI_BYPASS_EN;
+	bits |= BIT(1) | BIT(2); /* AHB_INCR1 and AHB_INCRX burst control */
 
 	/* A83T USB2 is HSIC */
 	if (phy_data->cfg->hsic_index &&
@@ -246,7 +251,7 @@ static void sun4i_usb_phy_passby(struct sun4i_usb_phy *phy, int enable)
 	reg_value = readl(phy->pmu);
 
 	if (enable)
-		reg_value |= bits;
+		reg_value = (reg_value | bits) & ~(BIT(31) | BIT(3));
 	else
 		reg_value &= ~bits;
 
@@ -401,6 +406,9 @@ static int sun4i_usb_phy_exit(struct phy *_phy)
 
 static int sun4i_usb_phy0_get_id_det(struct sun4i_usb_phy_data *data)
 {
+	if (data->usb_role >= 0)
+		return data->usb_role == USB_ROLE_HOST ? 0 : 1;
+
 	switch (data->dr_mode) {
 	case USB_DR_MODE_OTG:
 		if (data->id_det_gpio)
@@ -417,6 +425,9 @@ static int sun4i_usb_phy0_get_id_det(struct sun4i_usb_phy_data *data)
 
 static int sun4i_usb_phy0_get_vbus_det(struct sun4i_usb_phy_data *data)
 {
+	if (data->usb_role >= 0)
+		return data->usb_role == USB_ROLE_NONE ? 0 : 1;
+
 	if (data->vbus_det_gpio)
 		return gpiod_get_value_cansleep(data->vbus_det_gpio);
 
@@ -436,7 +447,7 @@ static int sun4i_usb_phy0_get_vbus_det(struct sun4i_usb_phy_data *data)
 
 static bool sun4i_usb_phy0_have_vbus_det(struct sun4i_usb_phy_data *data)
 {
-	return data->vbus_det_gpio || data->vbus_power_supply;
+	return data->usb_role >= 0 || data->vbus_det_gpio || data->vbus_power_supply;
 }
 
 static bool sun4i_usb_phy0_poll(struct sun4i_usb_phy_data *data)
@@ -538,6 +549,20 @@ static int sun4i_usb_phy_set_mode(struct phy *_phy,
 	if (new_mode != data->dr_mode) {
 		dev_info(&_phy->dev, "Changing dr_mode to %d\n", new_mode);
 		data->dr_mode = new_mode;
+
+		/*
+		 * When a role switch consumer has claimed the port, id/vbus
+		 * are derived from usb_role and a dr_mode change cannot
+		 * affect the routing -- skip the forced session end.  The
+		 * EHCI0/OHCI0 probes set host mode on phy0 via
+		 * usb_add_hcd() and would otherwise each cause a spurious
+		 * 1s disconnect pulse of the running gadget session during
+		 * boot.  An *unchanged* mode still falls through below:
+		 * sunxi_musb_recover() calls set_mode with the current mode
+		 * specifically to force a session end.
+		 */
+		if (data->usb_role >= 0)
+			return 0;
 	}
 
 	data->id_det = -1; /* Force reprocessing of id */
@@ -695,6 +720,43 @@ static struct phy *sun4i_usb_phy_xlate(struct device *dev,
 	return data->phys[args->args[0]].phy;
 }
 
+static int sun4i_usb_role_set(struct usb_role_switch *sw, enum usb_role role)
+{
+	struct sun4i_usb_phy_data *data = usb_role_switch_get_drvdata(sw);
+
+	/*
+	 * When the port stops being routed to the host controllers (id 0 -> 1)
+	 * the forced vbus_det typically stays 1 the whole time, so musb never
+	 * sees a vbus edge and its session stays dead -- the gadget does not
+	 * come up until the cable is physically replugged.  This happens e.g.
+	 * on boot with the cable attached: EHCI0/OHCI0 probe flips phy0 to
+	 * host mode via usb_add_hcd()'s phy_set_mode(PHY_MODE_USB_HOST)
+	 * before the type-c driver claims the role switch.  Mirror
+	 * sun4i_usb_phy_set_mode(): force a full id reprocess and a session
+	 * end (vbus_det pulse) for transitions that enter or leave host
+	 * routing.  Plain NONE <-> DEVICE changes keep the fast path, the
+	 * vbus_det edge alone is enough there.
+	 */
+	if (data->usb_role != role &&
+	    (role == USB_ROLE_HOST || data->id_det == 0)) {
+		data->id_det = -1;
+		data->force_session_end = true;
+	}
+
+	data->usb_role = role;
+	queue_delayed_work(system_wq, &data->detect, 0);
+
+	return 0;
+}
+
+static enum usb_role sun4i_usb_role_get(struct usb_role_switch *sw)
+{
+	struct sun4i_usb_phy_data *data = usb_role_switch_get_drvdata(sw);
+	int role = sun4i_usb_phy0_get_id_det(data) ? USB_ROLE_DEVICE : USB_ROLE_HOST;
+
+	return data->usb_role >= 0 ? data->usb_role : role;
+}
+
 static void sun4i_usb_phy_remove(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -708,6 +770,8 @@ static void sun4i_usb_phy_remove(struct platform_device *pdev)
 		devm_free_irq(dev, data->vbus_det_irq, data);
 
 	cancel_delayed_work_sync(&data->detect);
+
+	usb_role_switch_unregister(data->role_switch);
 }
 
 static const unsigned int sun4i_usb_phy0_cable[] = {
@@ -735,6 +799,8 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 	if (!data->cfg)
 		return -EINVAL;
 
+	data->usb_role = -1;
+
 	data->base = devm_platform_ioremap_resource_byname(pdev, "phy_ctrl");
 	if (IS_ERR(data->base))
 		return PTR_ERR(data->base);
@@ -742,14 +808,16 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 	data->id_det_gpio = devm_gpiod_get_optional(dev, "usb0_id_det",
 						    GPIOD_IN);
 	if (IS_ERR(data->id_det_gpio)) {
-		dev_err(dev, "Couldn't request ID GPIO\n");
+		dev_err_probe(dev, PTR_ERR(data->id_det_gpio),
+			      "Couldn't request ID GPIO\n");
 		return PTR_ERR(data->id_det_gpio);
 	}
 
 	data->vbus_det_gpio = devm_gpiod_get_optional(dev, "usb0_vbus_det",
 						      GPIOD_IN);
 	if (IS_ERR(data->vbus_det_gpio)) {
-		dev_err(dev, "Couldn't request VBUS detect GPIO\n");
+		dev_err_probe(dev, PTR_ERR(data->vbus_det_gpio),
+			      "Couldn't request VBUS detect GPIO\n");
 		return PTR_ERR(data->vbus_det_gpio);
 	}
 
@@ -757,7 +825,8 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		data->vbus_power_supply = devm_power_supply_get_by_reference(dev,
 						     "usb0_vbus_power-supply");
 		if (IS_ERR(data->vbus_power_supply)) {
-			dev_err(dev, "Couldn't get the VBUS power supply\n");
+			dev_err_probe(dev, PTR_ERR(data->vbus_power_supply),
+				      "Couldn't get the VBUS power supply\n");
 			return PTR_ERR(data->vbus_power_supply);
 		}
 
@@ -787,7 +856,7 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 			continue;
 
 		snprintf(name, sizeof(name), "usb%d_reset", i);
-		phy->reset = devm_reset_control_get(dev, name);
+		phy->reset = devm_reset_control_get_shared(dev, name);
 		if (IS_ERR(phy->reset)) {
 			if (PTR_ERR(phy->reset) == -ENOENT)
 				break;
@@ -799,8 +868,8 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 		phy->vbus = devm_regulator_get_optional(dev, name);
 		if (IS_ERR(phy->vbus)) {
 			if (PTR_ERR(phy->vbus) == -EPROBE_DEFER) {
-				dev_err(dev,
-					"Couldn't get regulator %s... Deferring probe\n",
+				dev_err_probe(dev, PTR_ERR(phy->vbus),
+					"Couldn't get regulator %s\n",
 					name);
 				return -EPROBE_DEFER;
 			}
@@ -815,7 +884,8 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 
 		phy->clk = devm_clk_get(dev, name);
 		if (IS_ERR(phy->clk)) {
-			dev_err(dev, "failed to get clock %s\n", name);
+			dev_err_probe(dev, PTR_ERR(phy->clk),
+				      "failed to get clock %s\n", name);
 			return PTR_ERR(phy->clk);
 		}
 
@@ -896,6 +966,23 @@ static int sun4i_usb_phy_probe(struct platform_device *pdev)
 	if (IS_ERR(phy_provider)) {
 		sun4i_usb_phy_remove(pdev); /* Stop detect work */
 		return PTR_ERR(phy_provider);
+	}
+
+	/* setup role switcher */
+	data->switch_desc.name = "usb0";
+	data->switch_desc.fwnode = dev_fwnode(dev);
+	data->switch_desc.set = sun4i_usb_role_set;
+	data->switch_desc.get = sun4i_usb_role_get;
+	data->switch_desc.driver_data = data;
+
+	/*
+	 * Don't interfere with the default behavior of this driver until
+	 * the consumer of the role switch uses the switch for the first time.
+	 */
+	data->role_switch = usb_role_switch_register(dev, &data->switch_desc);
+	if (IS_ERR(data->role_switch)) {
+		dev_warn(dev, "Unable to register Role Switch\n");
+		data->role_switch = NULL;
 	}
 
 	dev_dbg(dev, "successfully loaded\n");
@@ -1025,6 +1112,7 @@ static const struct of_device_id sun4i_usb_phy_of_match[] = {
 	{ .compatible = "allwinner,sun8i-r40-usb-phy", .data = &sun8i_r40_cfg },
 	{ .compatible = "allwinner,sun8i-v3s-usb-phy", .data = &sun8i_v3s_cfg },
 	{ .compatible = "allwinner,sun20i-d1-usb-phy", .data = &sun20i_d1_cfg },
+	{ .compatible = "allwinner,sun55i-a523-usb-phy", .data = &sun20i_d1_cfg },
 	{ .compatible = "allwinner,sun50i-a64-usb-phy",
 	  .data = &sun50i_a64_cfg},
 	{ .compatible = "allwinner,sun50i-h6-usb-phy", .data = &sun50i_h6_cfg },

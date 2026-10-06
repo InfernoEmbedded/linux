@@ -9,6 +9,7 @@
 #include <linux/clkdev.h>
 #include <linux/ctype.h>
 #include <linux/delay.h>
+#include <linux/firmware.h>
 #include <linux/device.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
@@ -67,11 +68,20 @@
 #define OV5640_REG_AWB_G_GAIN		0x3402
 #define OV5640_REG_AWB_B_GAIN		0x3404
 #define OV5640_REG_AWB_MANUAL_CTRL	0x3406
+/* AWB gains are in 1/1024 steps, 0x400 is unity gain */
+#define OV5640_AWB_GAIN_UNITY		0x400
 #define OV5640_REG_AEC_PK_EXPOSURE_HI	0x3500
 #define OV5640_REG_AEC_PK_EXPOSURE_MED	0x3501
 #define OV5640_REG_AEC_PK_EXPOSURE_LO	0x3502
 #define OV5640_REG_AEC_PK_MANUAL	0x3503
 #define OV5640_REG_AEC_PK_REAL_GAIN	0x350a
+/*
+ * "Real gain" is in 1/16 steps, 0x10 is unity. The sensor supports up to
+ * 64x, but only the first 16x are analogue - above that it engages its
+ * 2x/4x digital gain, so cap the analogue gain control there.
+ */
+#define OV5640_GAIN_UNITY		0x10
+#define OV5640_GAIN_MAX_ANALOGUE	0x100
 #define OV5640_REG_AEC_PK_VTS		0x350c
 #define OV5640_REG_TIMING_HS		0x3800
 #define OV5640_REG_TIMING_VS		0x3802
@@ -112,11 +122,102 @@
 #define OV5640_REG_ISP_FORMAT_MUX_CTRL	0x501f
 #define OV5640_REG_PRE_ISP_TEST_SET1	0x503d
 #define OV5640_REG_SDE_CTRL0		0x5580
+#define OV5640_SDE_CTRL0_HUE_EN		BIT(0)
+#define OV5640_SDE_CTRL0_SAT_EN		BIT(1)
+#define OV5640_SDE_CTRL0_CONTRAST_EN	BIT(2)
 #define OV5640_REG_SDE_CTRL1		0x5581
+#define OV5640_REG_SDE_CTRL2		0x5582
 #define OV5640_REG_SDE_CTRL3		0x5583
 #define OV5640_REG_SDE_CTRL4		0x5584
 #define OV5640_REG_SDE_CTRL5		0x5585
+#define OV5640_REG_SDE_CTRL6		0x5586
+#define OV5640_REG_SDE_CTRL7		0x5587
+#define OV5640_REG_SDE_CTRL8		0x5588
+/*
+ * Hue is a rotation of the U/V plane:
+ *
+ *   U' =  U * cos + V * sin
+ *   V' = -U * sin + V * cos
+ *
+ * SDE CTRL1 and CTRL2 hold the magnitudes of the two coefficients in
+ * 1/128 steps and SDE CTRL8 the signs of the terms they appear in. The
+ * two sine terms always have opposite signs, so exactly one of the two
+ * sine sign bits is set; both cosine terms share a sign.
+ */
+#define OV5640_SDE_CTRL8_HUE_SIN_POS	BIT(0)
+#define OV5640_SDE_CTRL8_HUE_SIN_NEG	BIT(1)
+#define OV5640_SDE_CTRL8_BRIGHT_NEG	BIT(3)
+#define OV5640_SDE_CTRL8_HUE_COS_NEG	(BIT(4) | BIT(5))
+#define OV5640_SDE_CTRL8_HUE_SIGN_MASK	(OV5640_SDE_CTRL8_HUE_SIN_POS | \
+					 OV5640_SDE_CTRL8_HUE_SIN_NEG | \
+					 OV5640_SDE_CTRL8_HUE_COS_NEG)
+/* Neutral settings of the SDE controls */
+#define OV5640_SATURATION_UNITY		0x40	/* UV adjust gain */
+#define OV5640_CONTRAST_UNITY		0x20	/* Y gain */
 #define OV5640_REG_AVG_READOUT		0x56a1
+
+/* autofocus registers */
+
+#define OV5640_REG_SYS_RESET00		0x3000
+#define OV5640_REG_SYS_RESET01		0x3001
+#define OV5640_REG_SYS_CLOCK_ENABLE00	0x3004
+#define OV5640_REG_SYS_CLOCK_ENABLE01	0x3005
+
+#define OV5640_REG_FW_CMD_MAIN		0x3022
+#define OV5640_REG_FW_CMD_ACK		0x3023
+#define OV5640_REG_FW_CMD_PARA0		0x3024
+#define OV5640_REG_FW_CMD_PARA1		0x3025
+#define OV5640_REG_FW_CMD_PARA2		0x3026
+#define OV5640_REG_FW_CMD_PARA3		0x3027
+#define OV5640_REG_FW_CMD_RESULT	0x3028
+#define OV5640_REG_FW_STATUS		0x3029
+
+#define OV5640_REG_VCM_CONTROL4		0x3606
+#define OV5640_REG_FIRMWARE_BASE	0x8000
+
+#define OV5640_FW_STATUS_S_FIRMWARE	0x7f
+#define OV5640_FW_STATUS_S_STARTUP	0x7e
+#define OV5640_FW_STATUS_S_IDLE		0x70
+#define OV5640_FW_STATUS_S_FOCUSING	0x00
+#define OV5640_FW_STATUS_S_FOCUSED	0x10
+
+#define OV5640_FW_CMD_TRIGGER_FOCUS	0x03
+#define OV5640_FW_CMD_CONTINUOUS_FOCUS	0x04
+#define OV5640_FW_CMD_GET_FOCUS_RESULT	0x07
+#define OV5640_FW_CMD_RELEASE_FOCUS	0x08
+#define OV5640_FW_CMD_PAUSE_FOCUS	0x06
+#define OV5640_FW_CMD_ZONE_CONFIG	0x12
+#define OV5640_FW_CMD_DEFAULT_ZONES	0x80
+#define OV5640_FW_CMD_SET_ZONE		0x81
+
+/*
+ * The focus zone is given on a virtual view finder the firmware defines
+ * as 80 wide, and 60 or 45 high depending on whether the frame is 4:3.
+ */
+#define OV5640_AF_ZONE_WIDTH		80
+#define OV5640_AF_ZONE_HEIGHT_4_3	60
+#define OV5640_AF_ZONE_HEIGHT		45
+
+/*
+ * The lens position, a 10 bit DAC code split across two registers. The
+ * autofocus firmware drives it while it is running, so it is only ours
+ * once the firmware has been paused rather than released - a release
+ * parks the lens at infinity and turns the coil current off.
+ */
+#define OV5640_REG_VCM_CONTROL0		0x3602
+#define OV5640_VCM_CONTROL0_CODE_LO	GENMASK(7, 4)
+#define OV5640_REG_VCM_CONTROL1		0x3603
+#define OV5640_VCM_CONTROL1_CODE_HI	GENMASK(5, 0)
+#define OV5640_FOCUS_MAX		1023
+
+/*
+ * Where the autofocus should look. V4L2 has no standard control for an
+ * autofocus window - only for starting, stopping and reporting one - so
+ * this is a private one. The value packs the point of interest as
+ * x << 16 | y in the frame's own pixels, and zero restores the default
+ * zones the firmware sets up for itself.
+ */
+#define V4L2_CID_OV5640_FOCUS_ZONE	(V4L2_CID_USER_BASE | 0x1001)
 
 enum ov5640_mode_id {
 	OV5640_MODE_QQVGA_160_120 = 0,
@@ -422,6 +523,14 @@ struct ov5640_ctrls {
 		struct v4l2_ctrl *auto_gain;
 		struct v4l2_ctrl *gain;
 	};
+	struct {
+		struct v4l2_ctrl *focus_auto;
+		struct v4l2_ctrl *focus_absolute;
+		struct v4l2_ctrl *af_start;
+		struct v4l2_ctrl *af_stop;
+		struct v4l2_ctrl *af_status;
+		struct v4l2_ctrl *focus_zone;
+	};
 	struct v4l2_ctrl *brightness;
 	struct v4l2_ctrl *light_freq;
 	struct v4l2_ctrl *saturation;
@@ -464,6 +573,8 @@ struct ov5640_dev {
 
 	bool pending_mode_change;
 	bool streaming;
+
+	bool af_initialized;
 };
 
 static inline struct ov5640_dev *to_ov5640_dev(struct v4l2_subdev *sd)
@@ -1190,10 +1301,48 @@ static int ov5640_write_reg(struct ov5640_dev *sensor, u16 reg, u8 val)
 	msg.buf = buf;
 	msg.len = sizeof(buf);
 
+	dev_dbg(&client->dev, "[wr %04x] <= %d\n", reg, val);
+
 	ret = i2c_transfer(client->adapter, &msg, 1);
 	if (ret < 0) {
 		dev_err(&client->dev, "%s: error: reg=%x, val=%x\n",
 			__func__, reg, val);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int ov5640_write_regs(struct ov5640_dev *sensor, u16 reg,
+			     const u8 *data, int data_size)
+{
+	struct i2c_client *client = sensor->i2c_client;
+	struct i2c_msg msg;
+	u8 buf[254 + 2];
+	int ret;
+
+	if (data_size > sizeof(buf) - 2) {
+		v4l2_err(&sensor->sd, "%s: oversized transfer (size=%d)\n",
+			 __func__, data_size);
+		return -EINVAL;
+	}
+
+	buf[0] = reg >> 8;
+	buf[1] = reg & 0xff;
+	memcpy(buf + 2, data, data_size);
+
+	msg.addr = client->addr;
+	msg.flags = client->flags;
+	msg.buf = buf;
+	msg.len = data_size + 2;
+
+	dev_dbg(&client->dev, "[wr %04x] <= %*ph\n", (u32)reg, data_size, data);
+
+	ret = i2c_transfer(client->adapter, &msg, 1);
+	if (ret < 0) {
+		v4l2_err(&sensor->sd,
+			 "%s: error %d: reg=%x, data=%*ph\n",
+			 __func__, ret, (u32)reg, data_size, data);
 		return ret;
 	}
 
@@ -2326,6 +2475,7 @@ static int ov5640_set_mode(struct ov5640_dev *sensor)
 	bool auto_gain = sensor->ctrls.auto_gain->val == 1;
 	bool auto_exp =  sensor->ctrls.auto_exp->val == V4L2_EXPOSURE_AUTO;
 	int ret;
+	u8 tmp;
 
 	dn_mode = mode->dn_mode;
 	orig_dn_mode = orig_mode->dn_mode;
@@ -2348,7 +2498,7 @@ static int ov5640_set_mode(struct ov5640_dev *sensor)
 	else
 		ret = ov5640_set_dvp_pclk(sensor);
 	if (ret < 0)
-		return 0;
+		goto restore_auto_exp_gain;
 
 	if ((dn_mode == SUBSAMPLING && orig_dn_mode == SCALING) ||
 	    (dn_mode == SCALING && orig_dn_mode == SUBSAMPLING)) {
@@ -2387,6 +2537,22 @@ static int ov5640_set_mode(struct ov5640_dev *sensor)
 		return ret;
 	ret = ov5640_set_virtual_channel(sensor);
 	if (ret < 0)
+		return ret;
+
+	ret = ov5640_read_reg(sensor, 0x5308, &tmp);
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, 0x5308, tmp | 0x10 | 0x40);
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, 0x5306, 0);
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, 0x5302, 0);
+	if (ret)
 		return ret;
 
 	sensor->pending_mode_change = false;
@@ -2476,9 +2642,164 @@ static void ov5640_powerup_sequence(struct ov5640_dev *sensor)
 			 OV5640_REG_SYS_CTRL0_SW_PWDN);
 }
 
+static int ov5640_copy_fw_to_device(struct ov5640_dev *sensor,
+					const struct firmware *fw)
+{
+	struct i2c_client *client = sensor->i2c_client;
+	const u8 *data = (const u8 *)fw->data;
+	u8 fw_status;
+	int i;
+	int ret;
+	int num_groups, group_size = 254;
+
+	// Putting MCU in reset state
+	ret = ov5640_write_reg(sensor, OV5640_REG_SYS_RESET00, 0x20);
+	if (ret)
+		return ret;
+
+	// Write firmware
+	num_groups = fw->size / group_size;
+	for (i = 0; i < num_groups; i++) {
+		ret = ov5640_write_regs(sensor,
+					OV5640_REG_FIRMWARE_BASE + i * group_size,
+					data + i * group_size,
+					group_size);
+		if (ret)
+			return ret;
+	}
+
+	if (i * group_size < fw->size) {
+		ret = ov5640_write_regs(sensor,
+					OV5640_REG_FIRMWARE_BASE + i * group_size,
+					data + i * group_size,
+					fw->size - i * group_size);
+		if (ret)
+			return ret;
+	}
+
+	// Reset MCU state
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_MAIN, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_ACK, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA0, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA1, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA2, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA3, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_CMD_RESULT, 0x00);
+	ov5640_write_reg(sensor, OV5640_REG_FW_STATUS, 0x7f);
+
+	// Start AF MCU
+	ret = ov5640_write_reg(sensor, OV5640_REG_SYS_RESET00, 0x00);
+	if (ret)
+		return ret;
+
+	dev_info(&client->dev, "firmware upload success\n");
+
+	// Wait for firmware to be ready
+	for (i = 0; i < 5; i++) {
+		ret = ov5640_read_reg(sensor, OV5640_REG_FW_STATUS, &fw_status);
+		if (ret) {
+			return ret;
+		}
+
+		if (fw_status == OV5640_FW_STATUS_S_IDLE) {
+			dev_info(&client->dev, "fw started after %d ms\n", i * 5);
+			return 0;
+		}
+		msleep(5);
+	}
+
+	dev_err(&client->dev, "uploaded firmware didn't start, got to 0x%x\n", fw_status);
+	return -ETIMEDOUT;
+}
+
+/*
+ * Issue a command to the autofocus firmware.
+ *
+ * The firmware takes a command when the ack register is set, and clears
+ * that register once the command has been carried out. Commands that
+ * move the lens hold it set for the whole scan, so only wait here for a
+ * previously issued command to be picked up, never for the one being
+ * issued - focus progress is reported through AUTO_FOCUS_STATUS.
+ */
+static int ov5640_fw_command(struct ov5640_dev *sensor, u8 command)
+{
+	struct i2c_client *client = sensor->i2c_client;
+	unsigned int i;
+	u8 ack = 1;
+	int ret;
+
+	for (i = 0; i < 10; i++) {
+		ret = ov5640_read_reg(sensor, OV5640_REG_FW_CMD_ACK, &ack);
+		if (ret)
+			return ret;
+		if (!ack)
+			break;
+
+		usleep_range(1000, 2000);
+	}
+
+	if (ack)
+		dev_dbg(&client->dev,
+			"previous focus command still pending, overriding it\n");
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_FW_CMD_ACK, 0x01);
+	if (ret)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_FW_CMD_MAIN, command);
+}
+
+static int ov5640_af_init(struct ov5640_dev *sensor)
+{
+	struct i2c_client *client = sensor->i2c_client;
+	const char* fwname = "ov5640_af.bin";
+	const struct firmware *fw;
+	int ret;
+
+	if (sensor->af_initialized) {
+		return 0;
+	}
+
+	if (firmware_request_nowarn(&fw, fwname, &client->dev) == 0) {
+		ret = ov5640_copy_fw_to_device(sensor, fw);
+		if (ret == 0)
+			sensor->af_initialized = 1;
+	} else {
+		dev_warn(&client->dev, "%s: no autofocus firmware available (%s)\n",
+			__func__, fwname);
+		ret = -1;
+	}
+	release_firmware(fw);
+
+	if (ret)
+		return ret;
+
+	// Enable AF systems
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYS_CLOCK_ENABLE00,
+			     (BIT(6) | BIT(5)), (BIT(6) | BIT(5)));
+	if (ret)
+		return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SYS_CLOCK_ENABLE01,
+			     BIT(6), BIT(6));
+	if (ret)
+		return ret;
+
+	// Set lens focus driver on
+	ret = ov5640_write_reg(sensor, OV5640_REG_VCM_CONTROL4, 0x3f);
+	if (ret)
+		return ret;
+
+	// Set the default focus zone
+	ret = ov5640_fw_command(sensor, OV5640_FW_CMD_ZONE_CONFIG);
+	if (ret)
+		return ret;
+	return ret;
+}
+
 static int ov5640_set_power_on(struct ov5640_dev *sensor)
 {
 	struct i2c_client *client = sensor->i2c_client;
+	u16 chip_id;
 	int ret;
 
 	ret = clk_prepare_enable(sensor->xclk);
@@ -2496,11 +2817,21 @@ static int ov5640_set_power_on(struct ov5640_dev *sensor)
 		goto xclk_off;
 	}
 
+	sensor->af_initialized = 0;
+
 	ov5640_powerup_sequence(sensor);
+
 
 	ret = ov5640_init_slave_id(sensor);
 	if (ret)
 		goto power_off;
+
+	ret = ov5640_read_reg16(sensor, OV5640_REG_CHIP_ID, &chip_id);
+	if (ret) {
+		dev_err(&client->dev, "%s: failed to read chip identifier\n",
+			__func__);
+		goto power_off;
+	}
 
 	return 0;
 
@@ -2517,6 +2848,7 @@ static void ov5640_set_power_off(struct ov5640_dev *sensor)
 	ov5640_power(sensor, false);
 	regulator_bulk_disable(OV5640_NUM_SUPPLIES, sensor->supplies);
 	clk_disable_unprepare(sensor->xclk);
+	msleep(100);
 }
 
 static int ov5640_set_power_mipi(struct ov5640_dev *sensor, bool on)
@@ -2849,6 +3181,26 @@ static int ov5640_try_fmt_internal(struct v4l2_subdev *sd,
 	return 0;
 }
 
+static void ov5640_update_exposure_range(struct ov5640_dev *sensor, u32 vblank)
+{
+	const struct ov5640_mode_info *mode = sensor->current_mode;
+	s32 exp_max, exp_val;
+
+	/*
+	 * __v4l2_ctrl_modify_range() replaces the current value with the
+	 * default passed to it when that value no longer fits the new
+	 * range, so clamp the current exposure and hand that over rather
+	 * than an unrelated number.
+	 */
+	exp_max = mode->height + vblank - 4;
+	exp_val = clamp_t(s32, sensor->ctrls.exposure->val,
+			  sensor->ctrls.exposure->minimum, exp_max);
+
+	__v4l2_ctrl_modify_range(sensor->ctrls.exposure,
+				 sensor->ctrls.exposure->minimum, exp_max,
+				 sensor->ctrls.exposure->step, exp_val);
+}
+
 static void __v4l2_ctrl_vblank_update(struct ov5640_dev *sensor, u32 vblank)
 {
 	const struct ov5640_mode_info *mode = sensor->current_mode;
@@ -2857,6 +3209,14 @@ static void __v4l2_ctrl_vblank_update(struct ov5640_dev *sensor, u32 vblank)
 				 OV5640_MAX_VTS - mode->height, 1, vblank);
 
 	__v4l2_ctrl_s_ctrl(sensor->ctrls.vblank, vblank);
+
+	/*
+	 * The control framework skips s_ctrl when the value does not
+	 * change, which happens when switching between two modes that
+	 * share a vblank default but not a height, so the exposure range
+	 * cannot be left to the VBLANK handler alone.
+	 */
+	ov5640_update_exposure_range(sensor, vblank);
 }
 
 static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
@@ -2865,7 +3225,6 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 	enum ov5640_pixel_rate_id pixel_rate_id = mode->pixel_rate;
 	struct v4l2_mbus_framefmt *fmt = &sensor->fmt;
 	const struct ov5640_timings *timings = ov5640_timings(sensor, mode);
-	s32 exposure_val, exposure_max;
 	unsigned int hblank;
 	unsigned int i = 0;
 	u32 pixel_rate;
@@ -2931,17 +3290,9 @@ static int ov5640_update_pixel_rate(struct ov5640_dev *sensor)
 	__v4l2_ctrl_modify_range(sensor->ctrls.hblank,
 				 hblank, hblank, 1, hblank);
 
+	/* This updates the exposure range through the VBLANK control. */
 	vblank = timings->vblank_def;
 	__v4l2_ctrl_vblank_update(sensor, vblank);
-
-	exposure_max = timings->crop.height + vblank - 4;
-	exposure_val = clamp_t(s32, sensor->ctrls.exposure->val,
-			       sensor->ctrls.exposure->minimum,
-			       exposure_max);
-
-	__v4l2_ctrl_modify_range(sensor->ctrls.exposure,
-				 sensor->ctrls.exposure->minimum,
-				 exposure_max, 1, exposure_val);
 
 	return 0;
 }
@@ -3087,61 +3438,141 @@ static int ov5640_set_framefmt(struct ov5640_dev *sensor,
  * Sensor Controls.
  */
 
+/* |cos| in 1/128 steps for 0 to 90 degrees; |sin| is the same table backwards */
+static const u8 ov5640_hue_cos[91] = {
+	0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x7f, 0x7f, 0x7f, 0x7e,
+	0x7e, 0x7e, 0x7d, 0x7d, 0x7c, 0x7c, 0x7b, 0x7a, 0x7a, 0x79,
+	0x78, 0x77, 0x77, 0x76, 0x75, 0x74, 0x73, 0x72, 0x71, 0x70,
+	0x6f, 0x6e, 0x6d, 0x6b, 0x6a, 0x69, 0x68, 0x66, 0x65, 0x63,
+	0x62, 0x61, 0x5f, 0x5e, 0x5c, 0x5b, 0x59, 0x57, 0x56, 0x54,
+	0x52, 0x51, 0x4f, 0x4d, 0x4b, 0x49, 0x48, 0x46, 0x44, 0x42,
+	0x40, 0x3e, 0x3c, 0x3a, 0x38, 0x36, 0x34, 0x32, 0x30, 0x2e,
+	0x2c, 0x2a, 0x28, 0x25, 0x23, 0x21, 0x1f, 0x1d, 0x1b, 0x18,
+	0x16, 0x14, 0x12, 0x10, 0x0d, 0x0b, 0x09, 0x07, 0x04, 0x02,
+	0x00,
+};
+
 static int ov5640_set_ctrl_hue(struct ov5640_dev *sensor, int value)
 {
+	unsigned int angle = value % 90;
+	u8 cos_coef, sin_coef, sign;
 	int ret;
 
-	if (value) {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
-				     BIT(0), BIT(0));
-		if (ret)
-			return ret;
-		ret = ov5640_write_reg16(sensor, OV5640_REG_SDE_CTRL1, value);
-	} else {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0, BIT(0), 0);
+	switch (value / 90) {
+	case 0:
+		cos_coef = ov5640_hue_cos[angle];
+		sin_coef = ov5640_hue_cos[90 - angle];
+		sign = OV5640_SDE_CTRL8_HUE_SIN_POS;
+		break;
+	case 1:
+		cos_coef = ov5640_hue_cos[90 - angle];
+		sin_coef = ov5640_hue_cos[angle];
+		sign = OV5640_SDE_CTRL8_HUE_SIN_POS |
+		       OV5640_SDE_CTRL8_HUE_COS_NEG;
+		break;
+	case 2:
+		cos_coef = ov5640_hue_cos[angle];
+		sin_coef = ov5640_hue_cos[90 - angle];
+		sign = OV5640_SDE_CTRL8_HUE_SIN_NEG |
+		       OV5640_SDE_CTRL8_HUE_COS_NEG;
+		break;
+	default:
+		cos_coef = ov5640_hue_cos[90 - angle];
+		sin_coef = ov5640_hue_cos[angle];
+		sign = OV5640_SDE_CTRL8_HUE_SIN_NEG;
+		break;
 	}
 
-	return ret;
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
+			     OV5640_SDE_CTRL0_HUE_EN,
+			     OV5640_SDE_CTRL0_HUE_EN);
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL1, cos_coef);
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL2, sin_coef);
+	if (ret)
+		return ret;
+
+	return ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL8,
+			      OV5640_SDE_CTRL8_HUE_SIGN_MASK, sign);
 }
 
 static int ov5640_set_ctrl_contrast(struct ov5640_dev *sensor, int value)
 {
 	int ret;
 
-	if (value) {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
-				     BIT(2), BIT(2));
-		if (ret)
-			return ret;
-		ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL5,
-				       value & 0xff);
-	} else {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0, BIT(2), 0);
-	}
+	/*
+	 * The contrast is the Y gain in SDE CTRL6, with 0x20 as unity.
+	 * The Y offset in SDE CTRL5 is only taken into account when manual
+	 * offset is enabled through a register the datasheet does not
+	 * document, so leave it alone and let the sensor derive it.
+	 */
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
+			     OV5640_SDE_CTRL0_CONTRAST_EN,
+			     OV5640_SDE_CTRL0_CONTRAST_EN);
+	if (ret)
+		return ret;
 
-	return ret;
+	return ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL6, value);
+}
+
+static int ov5640_set_ctrl_brightness(struct ov5640_dev *sensor, int value)
+{
+	int ret;
+
+	/*
+	 * The brightness is the Y bright offset in SDE CTRL7, a magnitude
+	 * with its sign in SDE CTRL8. It is part of the contrast function,
+	 * so that has to be enabled for it to take effect.
+	 */
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
+			     OV5640_SDE_CTRL0_CONTRAST_EN,
+			     OV5640_SDE_CTRL0_CONTRAST_EN);
+	if (ret)
+		return ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL8,
+			     OV5640_SDE_CTRL8_BRIGHT_NEG,
+			     value < 0 ? OV5640_SDE_CTRL8_BRIGHT_NEG : 0);
+	if (ret)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL7, abs(value));
 }
 
 static int ov5640_set_ctrl_saturation(struct ov5640_dev *sensor, int value)
 {
 	int ret;
 
-	if (value) {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
-				     BIT(1), BIT(1));
-		if (ret)
-			return ret;
-		ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL3,
-				       value & 0xff);
-		if (ret)
-			return ret;
-		ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL4,
-				       value & 0xff);
-	} else {
-		ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0, BIT(1), 0);
-	}
+	/*
+	 * The UV adjust block runs in automatic mode, where it ramps the
+	 * chroma gain between two endpoints as the sensor gain moves
+	 * between the two thresholds programmed by the init sequence, so
+	 * that chroma noise is suppressed in dark scenes. SDE CTRL3 is the
+	 * gain used at low sensor gain and SDE CTRL4 the one used at high
+	 * sensor gain, both with 0x40 as unity.
+	 *
+	 * They are not plain U and V saturation registers - that is what
+	 * they would be with manual UV adjust enabled in SDE CTRL8 - so
+	 * writing the same value to both, as this used to do, flattened
+	 * the ramp and lost the noise suppression. Scale both endpoints
+	 * instead, keeping the 4:1 ratio of the vendor settings.
+	 */
+	ret = ov5640_mod_reg(sensor, OV5640_REG_SDE_CTRL0,
+			     OV5640_SDE_CTRL0_SAT_EN,
+			     OV5640_SDE_CTRL0_SAT_EN);
+	if (ret)
+		return ret;
 
-	return ret;
+	ret = ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL3, value);
+	if (ret)
+		return ret;
+
+	return ov5640_write_reg(sensor, OV5640_REG_SDE_CTRL4, value / 4);
 }
 
 static int ov5640_set_ctrl_white_balance(struct ov5640_dev *sensor, int awb)
@@ -3158,6 +3589,14 @@ static int ov5640_set_ctrl_white_balance(struct ov5640_dev *sensor, int awb)
 		u16 blue = (u16)sensor->ctrls.blue_balance->val;
 
 		ret = ov5640_write_reg16(sensor, OV5640_REG_AWB_R_GAIN, red);
+		if (ret)
+			return ret;
+		/*
+		 * There is no control for the green channel, but the AWB
+		 * algorithm may have left it at something other than unity.
+		 */
+		ret = ov5640_write_reg16(sensor, OV5640_REG_AWB_G_GAIN,
+					 OV5640_AWB_GAIN_UNITY);
 		if (ret)
 			return ret;
 		ret = ov5640_write_reg16(sensor, OV5640_REG_AWB_B_GAIN, blue);
@@ -3180,23 +3619,114 @@ static int ov5640_set_ctrl_exposure(struct ov5640_dev *sensor,
 	}
 
 	if (!auto_exp && ctrls->exposure->is_new) {
-		u16 max_exp;
+		u16 extra_exp;
+		u32 max_exp;
 
+		/*
+		 * The exposure has to stay below the frame length, extra
+		 * lines included. Clamp to that instead of dropping the
+		 * write, so that the control does not silently stop having
+		 * an effect at the top of its range.
+		 */
 		ret = ov5640_read_reg16(sensor, OV5640_REG_AEC_PK_VTS,
-					&max_exp);
+					&extra_exp);
 		if (ret)
 			return ret;
 		ret = ov5640_get_vts(sensor);
 		if (ret < 0)
 			return ret;
-		max_exp += ret;
-		ret = 0;
 
-		if (ctrls->exposure->val < max_exp)
-			ret = ov5640_set_exposure(sensor, ctrls->exposure->val);
+		max_exp = extra_exp + ret;
+		ret = ov5640_set_exposure(sensor,
+					  min_t(u32, ctrls->exposure->val,
+						max_exp - 1));
 	}
 
 	return ret;
+}
+
+/*
+ * Move the lens by hand. The firmware owns the DAC while it is running,
+ * so this is only meaningful once it has been paused - see the focus
+ * cluster in ov5640_set_ctrl().
+ */
+static int ov5640_set_focus_position(struct ov5640_dev *sensor, u32 pos)
+{
+	int ret;
+
+	ret = ov5640_mod_reg(sensor, OV5640_REG_VCM_CONTROL1,
+			     OV5640_VCM_CONTROL1_CODE_HI,
+			     FIELD_PREP(OV5640_VCM_CONTROL1_CODE_HI, pos >> 4));
+	if (ret)
+		return ret;
+
+	return ov5640_mod_reg(sensor, OV5640_REG_VCM_CONTROL0,
+			      OV5640_VCM_CONTROL0_CODE_LO,
+			      FIELD_PREP(OV5640_VCM_CONTROL0_CODE_LO,
+					 pos & 0xf));
+}
+
+/*
+ * Point the autofocus at one place in the frame. The zone is a centre on
+ * a virtual view finder the firmware sizes itself, so the caller works
+ * in frame coordinates and the scaling happens here. Zero means give the
+ * default zones back.
+ */
+static int ov5640_set_focus_zone(struct ov5640_dev *sensor, u32 packed)
+{
+	const struct v4l2_mbus_framefmt *fmt = &sensor->fmt;
+	unsigned int x, y, h;
+	int ret;
+
+	if (!packed)
+		return ov5640_fw_command(sensor, OV5640_FW_CMD_DEFAULT_ZONES);
+
+	/* the virtual view finder is only 4:3 when the frame is */
+	h = fmt->width * 3 == fmt->height * 4 ?
+		OV5640_AF_ZONE_HEIGHT_4_3 : OV5640_AF_ZONE_HEIGHT;
+
+	x = (packed >> 16) * OV5640_AF_ZONE_WIDTH / max(fmt->width, 1u);
+	y = (packed & 0xffff) * h / max(fmt->height, 1u);
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA0,
+			       min(x, OV5640_AF_ZONE_WIDTH - 1u));
+	if (ret)
+		return ret;
+
+	ret = ov5640_write_reg(sensor, OV5640_REG_FW_CMD_PARA1,
+			       min(y, h - 1u));
+	if (ret)
+		return ret;
+
+	ret = ov5640_fw_command(sensor, OV5640_FW_CMD_SET_ZONE);
+	if (ret)
+		return ret;
+
+	/* the note asks for a settle before the focus that follows */
+	usleep_range(5000, 6000);
+	return 0;
+}
+
+static int ov5640_set_ctrl_focus(struct ov5640_dev *sensor, u8 command)
+{
+	struct i2c_client *client = sensor->i2c_client;
+	int ret;
+
+	// Don't attempt to do focus if the embedded controller is powered down
+	if (!sensor->streaming) {
+		dev_err(&client->dev, "%s: can't set focus when not powered\n",
+			__func__);
+		return 0;
+	}
+
+	ret = ov5640_af_init(sensor);
+	if (ret) {
+		dev_err(&client->dev, "%s: autofocus firmware load failed\n",
+			__func__);
+		return 0;
+	}
+
+	return ov5640_fw_command(sensor, command);
 }
 
 static int ov5640_set_ctrl_gain(struct ov5640_dev *sensor, bool auto_gain)
@@ -3314,10 +3844,37 @@ static int ov5640_set_ctrl_vblank(struct ov5640_dev *sensor, int value)
 				  mode->height + value);
 }
 
+static int ov5640_get_af_status(struct ov5640_dev *sensor)
+{
+	u8 fw_status;
+	int ret;
+
+	ret = ov5640_read_reg(sensor, OV5640_REG_FW_STATUS, &fw_status);
+	if (ret)
+		return ret;
+
+	switch (fw_status) {
+		case OV5640_FW_STATUS_S_FIRMWARE:
+		case OV5640_FW_STATUS_S_STARTUP:
+			return V4L2_AUTO_FOCUS_STATUS_FAILED;
+			break;
+		case OV5640_FW_STATUS_S_IDLE:
+			return V4L2_AUTO_FOCUS_STATUS_IDLE;
+			break;
+		case OV5640_FW_STATUS_S_FOCUSED:
+			return V4L2_AUTO_FOCUS_STATUS_REACHED;
+			break;
+		default:
+			return V4L2_AUTO_FOCUS_STATUS_BUSY;
+			break;
+	}
+}
+
 static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct v4l2_subdev *sd = ctrl_to_sd(ctrl);
 	struct ov5640_dev *sensor = to_ov5640_dev(sd);
+	int ret = 0;
 	int val;
 
 	/* v4l2_ctrl_lock() locks our own mutex */
@@ -3329,29 +3886,35 @@ static int ov5640_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_AUTOGAIN:
 		val = ov5640_get_gain(sensor);
 		if (val < 0)
-			return val;
-		sensor->ctrls.gain->val = val;
+			ret = val;
+		else
+			sensor->ctrls.gain->val = val;
 		break;
 	case V4L2_CID_EXPOSURE_AUTO:
 		val = ov5640_get_exposure(sensor);
 		if (val < 0)
-			return val;
-		sensor->ctrls.exposure->val = val;
+			ret = val;
+		else
+			sensor->ctrls.exposure->val = val;
+		break;
+	case V4L2_CID_AUTO_FOCUS_STATUS:
+		val = ov5640_get_af_status(sensor);
+		if (val < 0)
+			ret = val;
+		else
+			sensor->ctrls.af_status->val = val;
 		break;
 	}
 
 	pm_runtime_put_autosuspend(&sensor->i2c_client->dev);
 
-	return 0;
+	return ret;
 }
 
 static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 {
 	struct v4l2_subdev *sd = ctrl_to_sd(ctrl);
 	struct ov5640_dev *sensor = to_ov5640_dev(sd);
-	const struct ov5640_mode_info *mode = sensor->current_mode;
-	const struct ov5640_timings *timings;
-	unsigned int exp_max;
 	int ret;
 
 	/* v4l2_ctrl_lock() locks our own mutex */
@@ -3359,12 +3922,7 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	switch (ctrl->id) {
 	case V4L2_CID_VBLANK:
 		/* Update the exposure range to the newly programmed vblank. */
-		timings = ov5640_timings(sensor, mode);
-		exp_max = mode->height + ctrl->val - 4;
-		__v4l2_ctrl_modify_range(sensor->ctrls.exposure,
-					 sensor->ctrls.exposure->minimum,
-					 exp_max, sensor->ctrls.exposure->step,
-					 timings->vblank_def);
+		ov5640_update_exposure_range(sensor, ctrl->val);
 		break;
 	}
 
@@ -3386,8 +3944,45 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 	case V4L2_CID_AUTO_WHITE_BALANCE:
 		ret = ov5640_set_ctrl_white_balance(sensor, ctrl->val);
 		break;
+	case V4L2_CID_FOCUS_AUTO:
+		/*
+		 * The cluster head, so this runs for the lens position too.
+		 * Manual pauses the firmware rather than releasing it: a
+		 * release parks the lens at infinity and cuts the coil
+		 * current, which leaves nothing to position.
+		 */
+		if (ctrl->val) {
+			ret = ov5640_set_ctrl_focus(sensor,
+						    OV5640_FW_CMD_CONTINUOUS_FOCUS);
+			break;
+		}
+
+		ret = ov5640_set_ctrl_focus(sensor, OV5640_FW_CMD_PAUSE_FOCUS);
+		if (ret)
+			break;
+
+		ret = ov5640_set_focus_position(sensor,
+						sensor->ctrls.focus_absolute->val);
+		break;
+
+	case V4L2_CID_FOCUS_ABSOLUTE:
+		/* only reachable while the cluster is in manual */
+		ret = ov5640_set_focus_position(sensor, ctrl->val);
+		break;
+	case V4L2_CID_OV5640_FOCUS_ZONE:
+		ret = ov5640_set_focus_zone(sensor, ctrl->val);
+		break;
+	case V4L2_CID_AUTO_FOCUS_START:
+		ret = ov5640_set_ctrl_focus(sensor, OV5640_FW_CMD_TRIGGER_FOCUS);
+		break;
+	case V4L2_CID_AUTO_FOCUS_STOP:
+		ret = ov5640_set_ctrl_focus(sensor, OV5640_FW_CMD_RELEASE_FOCUS);
+		break;
 	case V4L2_CID_HUE:
 		ret = ov5640_set_ctrl_hue(sensor, ctrl->val);
+		break;
+	case V4L2_CID_BRIGHTNESS:
+		ret = ov5640_set_ctrl_brightness(sensor, ctrl->val);
 		break;
 	case V4L2_CID_CONTRAST:
 		ret = ov5640_set_ctrl_contrast(sensor, ctrl->val);
@@ -3423,6 +4018,17 @@ static int ov5640_s_ctrl(struct v4l2_ctrl *ctrl)
 static const struct v4l2_ctrl_ops ov5640_ctrl_ops = {
 	.g_volatile_ctrl = ov5640_g_volatile_ctrl,
 	.s_ctrl = ov5640_s_ctrl,
+};
+
+static const struct v4l2_ctrl_config ov5640_ctrl_focus_zone = {
+	.ops = &ov5640_ctrl_ops,
+	.id = V4L2_CID_OV5640_FOCUS_ZONE,
+	.name = "Focus Zone",
+	.type = V4L2_CTRL_TYPE_INTEGER,
+	.min = 0,
+	.max = 0x7fffffff,
+	.step = 1,
+	.def = 0,
 };
 
 static int ov5640_init_controls(struct ov5640_dev *sensor)
@@ -3469,9 +4075,11 @@ static int ov5640_init_controls(struct ov5640_dev *sensor)
 					   V4L2_CID_AUTO_WHITE_BALANCE,
 					   0, 1, 1, 1);
 	ctrls->blue_balance = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_BLUE_BALANCE,
-						0, 4095, 1, 0);
+						0, 4095, 1,
+						OV5640_AWB_GAIN_UNITY);
 	ctrls->red_balance = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_RED_BALANCE,
-					       0, 4095, 1, 0);
+					       0, 4095, 1,
+					       OV5640_AWB_GAIN_UNITY);
 	/* Auto/manual exposure */
 	ctrls->auto_exp = v4l2_ctrl_new_std_menu(hdl, ops,
 						 V4L2_CID_EXPOSURE_AUTO,
@@ -3483,14 +4091,58 @@ static int ov5640_init_controls(struct ov5640_dev *sensor)
 	ctrls->auto_gain = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_AUTOGAIN,
 					     0, 1, 1, 1);
 	ctrls->gain = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_ANALOGUE_GAIN,
-					0, 1023, 1, 0);
+					OV5640_GAIN_UNITY,
+					OV5640_GAIN_MAX_ANALOGUE, 1,
+					OV5640_GAIN_UNITY);
 
+	/* Autofocus */
+	ctrls->focus_auto = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_FOCUS_AUTO,
+					    0, 1, 1, 0);
+	/*
+	 * The lens position, which is only ours while the firmware is
+	 * paused - hence the cluster with the switch above.
+	 */
+	ctrls->focus_absolute = v4l2_ctrl_new_std(hdl, ops,
+						  V4L2_CID_FOCUS_ABSOLUTE, 0,
+						  OV5640_FOCUS_MAX, 1,
+						  OV5640_FOCUS_MAX / 2);
+	ctrls->focus_zone = v4l2_ctrl_new_custom(hdl, &ov5640_ctrl_focus_zone,
+						 NULL);
+	ctrls->af_start = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_AUTO_FOCUS_START,
+					    0, 1, 1, 0);
+	ctrls->af_stop = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_AUTO_FOCUS_STOP,
+					   0, 1, 1, 0);
+	ctrls->af_status = v4l2_ctrl_new_std(hdl, ops,
+					     V4L2_CID_AUTO_FOCUS_STATUS, 0,
+					     (V4L2_AUTO_FOCUS_STATUS_BUSY |
+					      V4L2_AUTO_FOCUS_STATUS_REACHED |
+					      V4L2_AUTO_FOCUS_STATUS_FAILED),
+					     0, V4L2_AUTO_FOCUS_STATUS_IDLE);
+
+	/*
+	 * Both of these are gains with a unity well below the register
+	 * maximum, so a range that runs to 255 puts unity at a quarter and
+	 * an eighth of the way along and squeezes everything usable into
+	 * the bottom of the slider. Chroma and luma clip long before the
+	 * top of that range is reached anyway. Stop at twice unity, which
+	 * puts it in the middle and still covers more than the vendor
+	 * settings ever ask for - they reach 0x60 of saturation and 0x2c
+	 * of contrast.
+	 */
 	ctrls->saturation = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_SATURATION,
-					      0, 255, 1, 64);
+					      0, OV5640_SATURATION_UNITY * 2, 1,
+					      OV5640_SATURATION_UNITY);
 	ctrls->hue = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_HUE,
 				       0, 359, 1, 0);
+	/*
+	 * The brightness is a signed luma offset and is already centred, so
+	 * it keeps the whole range the register can express.
+	 */
+	ctrls->brightness = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_BRIGHTNESS,
+					      -255, 255, 1, 0);
 	ctrls->contrast = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_CONTRAST,
-					    0, 255, 1, 0);
+					    0, OV5640_CONTRAST_UNITY * 2, 1,
+					    OV5640_CONTRAST_UNITY);
 	ctrls->test_pattern =
 		v4l2_ctrl_new_std_menu_items(hdl, ops, V4L2_CID_TEST_PATTERN,
 					     ARRAY_SIZE(test_pattern_menu) - 1,
@@ -3525,12 +4177,20 @@ static int ov5640_init_controls(struct ov5640_dev *sensor)
 	ctrls->pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 	ctrls->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 	ctrls->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+	ctrls->vblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 	ctrls->gain->flags |= V4L2_CTRL_FLAG_VOLATILE;
 	ctrls->exposure->flags |= V4L2_CTRL_FLAG_VOLATILE;
+	ctrls->af_status->flags |= V4L2_CTRL_FLAG_VOLATILE;
 
 	v4l2_ctrl_auto_cluster(3, &ctrls->auto_wb, 0, false);
 	v4l2_ctrl_auto_cluster(2, &ctrls->auto_gain, 0, true);
 	v4l2_ctrl_auto_cluster(2, &ctrls->auto_exp, 1, true);
+	/*
+	 * Manual is 0 here, so the core marks the lens position inactive
+	 * whenever the autofocus is switched on and userspace does not have
+	 * to work that out for itself.
+	 */
+	v4l2_ctrl_auto_cluster(2, &ctrls->focus_auto, 0, false);
 
 	sensor->sd.ctrl_handler = hdl;
 	return 0;
@@ -3819,28 +4479,6 @@ static int ov5640_get_regulators(struct ov5640_dev *sensor)
 				       sensor->supplies);
 }
 
-static int ov5640_check_chip_id(struct ov5640_dev *sensor)
-{
-	struct i2c_client *client = sensor->i2c_client;
-	int ret = 0;
-	u16 chip_id;
-
-	ret = ov5640_read_reg16(sensor, OV5640_REG_CHIP_ID, &chip_id);
-	if (ret) {
-		dev_err(&client->dev, "%s: failed to read chip identifier\n",
-			__func__);
-		return ret;
-	}
-
-	if (chip_id != 0x5640) {
-		dev_err(&client->dev, "%s: wrong chip identifier, expected 0x5640, got 0x%x\n",
-			__func__, chip_id);
-		return -ENXIO;
-	}
-
-	return 0;
-}
-
 static int ov5640_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
@@ -3867,7 +4505,7 @@ static int ov5640_probe(struct i2c_client *client)
 	sensor->current_link_freq =
 		ov5640_csi2_link_freqs[OV5640_DEFAULT_LINK_FREQ];
 
-	sensor->ae_target = 52;
+	sensor->ae_target = 28;
 
 	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(&client->dev),
 						  NULL);
@@ -3931,8 +4569,10 @@ static int ov5640_probe(struct i2c_client *client)
 		return ret;
 
 	ret = ov5640_get_regulators(sensor);
-	if (ret)
+	if (ret) {
+		dev_err_probe(dev, ret, "Failed to get regulators\n");
 		goto entity_cleanup;
+	}
 
 	mutex_init(&sensor->lock);
 
@@ -3940,34 +4580,18 @@ static int ov5640_probe(struct i2c_client *client)
 	if (ret)
 		goto entity_cleanup;
 
-	ret = ov5640_sensor_resume(dev);
+	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
 	if (ret) {
-		dev_err(dev, "failed to power on\n");
+		dev_err_probe(dev, ret, "Failed to register sensor\n");
 		goto free_ctrls;
 	}
 
-	pm_runtime_set_active(dev);
-	pm_runtime_get_noresume(dev);
 	pm_runtime_enable(dev);
-
-	ret = ov5640_check_chip_id(sensor);
-	if (ret)
-		goto err_pm_runtime;
-
-	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
-	if (ret)
-		goto err_pm_runtime;
-
 	pm_runtime_set_autosuspend_delay(dev, 1000);
 	pm_runtime_use_autosuspend(dev);
-	pm_runtime_put_autosuspend(dev);
 
 	return 0;
 
-err_pm_runtime:
-	pm_runtime_put_noidle(dev);
-	pm_runtime_disable(dev);
-	ov5640_sensor_suspend(dev);
 free_ctrls:
 	v4l2_ctrl_handler_free(&sensor->ctrls.handler);
 entity_cleanup:
@@ -3982,6 +4606,8 @@ static void ov5640_remove(struct i2c_client *client)
 	struct ov5640_dev *sensor = to_ov5640_dev(sd);
 	struct device *dev = &client->dev;
 
+	pm_runtime_dont_use_autosuspend(dev);
+
 	pm_runtime_disable(dev);
 	if (!pm_runtime_status_suspended(dev))
 		ov5640_sensor_suspend(dev);
@@ -3994,6 +4620,8 @@ static void ov5640_remove(struct i2c_client *client)
 }
 
 static const struct dev_pm_ops ov5640_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
 	SET_RUNTIME_PM_OPS(ov5640_sensor_suspend, ov5640_sensor_resume, NULL)
 };
 

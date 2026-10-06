@@ -124,10 +124,15 @@
 #define RGA_SRC_HSCL_MODE_NO 0
 #define RGA_SRC_HSCL_MODE_DOWN 1
 #define RGA_SRC_HSCL_MODE_UP 2
+/* Undocumented: routes the fetch through the scaler at 1:1 (zero factors).
+ * Required for 10-bit sources, whose direct fetch path mis-addresses every
+ * other 128-pixel tile; matches the vendor driver's 10-bit handling. */
+#define RGA_SRC_HSCL_MODE_BYPASS 3
 
 #define RGA_SRC_VSCL_MODE_NO 0
 #define RGA_SRC_VSCL_MODE_DOWN 1
 #define RGA_SRC_VSCL_MODE_UP 2
+#define RGA_SRC_VSCL_MODE_BYPASS 3
 
 #define RGA_SRC_TRANS_ENABLE_R 1
 #define RGA_SRC_TRANS_ENABLE_G 2
@@ -216,8 +221,12 @@ union rga_src_info {
 		/* [23:25] */
 		unsigned int dither_up_en:1;
 		unsigned int bic_coe_sel:2;
-		/* [26:31] */
-		unsigned int reserved:6;
+		/* [26:28] */
+		unsigned int vsp_mode:1;
+		unsigned int yuv10_e:1;
+		unsigned int yuv10_round_e:1;
+		/* [29:31] */
+		unsigned int reserved:3;
 	} data;
 };
 
@@ -437,6 +446,8 @@ struct rga_fmt {
 	u32 fourcc;
 	u8 color_swap;
 	u8 hw_format;
+	/* Packed 10-bit YUV, readable by the source channel only. */
+	bool yuv10;
 };
 
 #endif

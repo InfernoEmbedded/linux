@@ -143,6 +143,36 @@ static int rkisp1_debug_dump_mi_mp_show(struct seq_file *m, void *p)
 }
 DEFINE_SHOW_ATTRIBUTE(rkisp1_debug_dump_mi_mp);
 
+/*
+ * MIPI receiver registers, including the additional-data path. CUR_DATA_ID
+ * reports the data type of the most recently received packet, which is the
+ * cheapest way to tell whether a sensor's out-of-band packets reach the ISP
+ * at all. MIPI_ADD_DATA_FIFO is deliberately not dumped: reading it pops
+ * captured data.
+ */
+static int rkisp1_debug_dump_mipi_regs_show(struct seq_file *m, void *p)
+{
+	static const struct rkisp1_debug_register registers[] = {
+		RKISP1_DEBUG_REG(MIPI_CTRL),
+		RKISP1_DEBUG_REG(MIPI_STATUS),
+		RKISP1_DEBUG_REG(MIPI_IMSC),
+		RKISP1_DEBUG_REG(MIPI_RIS),
+		RKISP1_DEBUG_REG(MIPI_CUR_DATA_ID),
+		RKISP1_DEBUG_REG(MIPI_IMG_DATA_SEL),
+		RKISP1_DEBUG_REG(MIPI_ADD_DATA_SEL_1),
+		RKISP1_DEBUG_REG(MIPI_ADD_DATA_SEL_2),
+		RKISP1_DEBUG_REG(MIPI_ADD_DATA_SEL_3),
+		RKISP1_DEBUG_REG(MIPI_ADD_DATA_SEL_4),
+		RKISP1_DEBUG_REG(MIPI_FIFO_FILL_LEVEL),
+		RKISP1_DEBUG_REG(MIPI_FRAME),
+		{ /* Sentinel */ },
+	};
+	struct rkisp1_device *rkisp1 = m->private;
+
+	return rkisp1_debug_dump_regs(rkisp1, m, 0, registers);
+}
+DEFINE_SHOW_ATTRIBUTE(rkisp1_debug_dump_mipi_regs);
+
 #define RKISP1_DEBUG_DATA_COUNT_BINS	32
 #define RKISP1_DEBUG_DATA_COUNT_STEP	(4096 / RKISP1_DEBUG_DATA_COUNT_BINS)
 
@@ -223,6 +253,20 @@ void rkisp1_debug_init(struct rkisp1_device *rkisp1)
 			     &debug->frame_drop[RKISP1_SELFPATH]);
 	debugfs_create_ulong("complete_frames", 0444, debug->debugfs_dir,
 			     &debug->complete_frames);
+	debugfs_create_ulong("addata_frames", 0444, debug->debugfs_dir,
+			     &debug->addata_frames);
+	debugfs_create_ulong("addata_bytes", 0444, debug->debugfs_dir,
+			     &debug->addata_bytes);
+	debugfs_create_ulong("addata_dropped", 0444, debug->debugfs_dir,
+			     &debug->addata_dropped);
+	debugfs_create_ulong("addata_overflow", 0444, debug->debugfs_dir,
+			     &debug->addata_overflow);
+	debugfs_create_ulong("addata_nobuf", 0444, debug->debugfs_dir,
+			     &debug->addata_nobuf);
+	debugfs_create_ulong("addata_budget", 0444, debug->debugfs_dir,
+			     &debug->addata_budget);
+	debugfs_create_ulong("addata_last_id", 0444, debug->debugfs_dir,
+			     &debug->addata_last_id);
 	debugfs_create_file("input_status", 0444, debug->debugfs_dir, rkisp1,
 			    &rkisp1_debug_input_status_fops);
 
@@ -241,6 +285,10 @@ void rkisp1_debug_init(struct rkisp1_device *rkisp1)
 
 	debugfs_create_file("mi_mp", 0444, regs_dir, rkisp1,
 			    &rkisp1_debug_dump_mi_mp_fops);
+
+	if (rkisp1_has_feature(rkisp1, MIPI_CSI2))
+		debugfs_create_file("mipi", 0444, regs_dir, rkisp1,
+				    &rkisp1_debug_dump_mipi_regs_fops);
 }
 
 void rkisp1_debug_cleanup(struct rkisp1_device *rkisp1)

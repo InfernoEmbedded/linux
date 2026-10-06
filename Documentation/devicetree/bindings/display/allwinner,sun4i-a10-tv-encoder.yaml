@@ -4,7 +4,7 @@
 $id: http://devicetree.org/schemas/display/allwinner,sun4i-a10-tv-encoder.yaml#
 $schema: http://devicetree.org/meta-schemas/core.yaml#
 
-title: Allwinner A10 TV Encoder
+title: Allwinner A10/H3/H5 TV Encoder
 
 maintainers:
   - Chen-Yu Tsai <wens@csie.org>
@@ -12,7 +12,10 @@ maintainers:
 
 properties:
   compatible:
-    const: allwinner,sun4i-a10-tv-encoder
+    enum:
+      - allwinner,sun4i-a10-tv-encoder
+      - allwinner,sun8i-h3-tv-encoder
+      - allwinner,sun50i-h5-tv-encoder
 
   reg:
     maxItems: 1

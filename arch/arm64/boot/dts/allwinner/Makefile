@@ -66,3 +66,66 @@ dtb-$(CONFIG_ARCH_SUNXI) += sun55i-a527-cubie-a5e.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun55i-h728-x96qpro+.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun55i-t527-avaota-a1.dtb
 dtb-$(CONFIG_ARCH_SUNXI) += sun55i-t527-orangepi-4a.dtb
+
+
+# Added by Armbian autopatcher in add-only:true mode
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-tanix-tx6s-axp313.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-walnutpi-1b.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-mellow-fly-c5.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-sovol-zero.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-sovol-sv08.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-bananapi-m4-zero.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h313-x96q-lpddr3.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-nanopi-k1-plus.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-bananapi-m4-berry.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-olinuxino-1Ge16GW.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-walnutpi-zerow.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-nanopi-m1-plus2.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-olinuxino-1G.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-olinuxino-1Ge4GW.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-nanopi-neo2-v1.1.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-bigtreetech-cb1-sd.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-tanix-tx6s.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-olinuxino-1Gs16M.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h6-inovato-quadra.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun60i-a733-orangepi-4-pro.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-walnutpi-box.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-olinuxino-2Ge8G.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h618-kickpi-k2b.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-sovol-sv08-max.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h5-nanopi-neo-core2.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-a64-pinephone-1.2b.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h616-bigtreetech-cb1-emmc.dtb
+
+dtb-$(CONFIG_ARCH_SUNXI) += sun50i-h6-orangepi-3-lts.dtb
+
+
+# Added by Armbian autopatcher for DT overlay
+subdir-y       := $(dts-dirs) overlay

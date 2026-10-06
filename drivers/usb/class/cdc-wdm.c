@@ -1312,6 +1312,29 @@ static int wdm_resume(struct usb_interface *intf)
 	dev_dbg(&desc->intf->dev, "wdm%d_resume\n", intf->minor);
 
 	clear_bit(WDM_SUSPENDING, &desc->flags);
+
+	/*
+	 * A RESPONSE_AVAILABLE notification arriving while WDM_SUSPENDING was
+	 * set leaves WDM_RESPONDING set and resp_count raised by
+	 * wdm_int_callback(), without the response URB ever being submitted.
+	 * Nothing clears that pair until the last close, so every later
+	 * notification finds the device already "responding" and no
+	 * GET_ENCAPSULATED_RESPONSE is ever issued again: the character device
+	 * stays open, and silent, for good.
+	 *
+	 * Drop the stale response instead. It cannot be fetched anyway after
+	 * the bus reset that a system resume brings, and the next notification
+	 * then re-arms the endpoint normally. Do it before resubmitting the
+	 * interrupt URB, or a notification can race in and latch again.
+	 *
+	 * Nothing is in flight here: wdm_suspend() poisoned the URBs and
+	 * cancelled the work.
+	 */
+	spin_lock_irq(&desc->iuspin);
+	desc->resp_count = 0;
+	clear_bit(WDM_RESPONDING, &desc->flags);
+	spin_unlock_irq(&desc->iuspin);
+
 	rv = recover_from_urb_loss(desc);
 
 	return rv;

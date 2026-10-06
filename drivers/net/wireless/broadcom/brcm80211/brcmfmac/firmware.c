@@ -834,7 +834,7 @@ brcmf_fw_alloc_request(u32 chip, u32 chiprev,
 	if (!fwreq)
 		return NULL;
 
-	brcmf_info("using %s for chip %s\n",
+	brcmf_dbg(INFO, "using %s for chip %s\n",
 		   mapping_table[i].fw_base, chipname);
 
 	mp_path = brcmf_mp_global.firmware_path;

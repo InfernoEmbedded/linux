@@ -12,6 +12,7 @@ config PHY_SUN4I_USB
 	depends on USB_SUPPORT
 	select GENERIC_PHY
 	select USB_COMMON
+	select USB_ROLE_SWITCH
 	help
 	  Enable this to support the transceiver that is part of Allwinner
 	  sunxi SoCs.
@@ -57,3 +58,29 @@ config PHY_SUN50I_USB3
 	  part of Allwinner H6 SoC.
 
 	  This driver controls each individual USB 2+3 host PHY combo.
+
+config AC200_PHY_CTL
+	tristate "X-Power AC200 PHY control driver"
+	depends on MFD_AC200
+	depends on RESET_CONTROLLER
+	help
+	  Enable this to support the Ethernet PHY operation of the AC200
+	  mixed signal chip. This driver just enables and configures the
+	  PHY, the PHY itself is supported by a standard driver.
+
+config AW_INNO_COMBOPHY
+	tristate "Allwinner INNO COMBO PHY Driver"
+	depends on ARCH_SUNXI && OF
+	select GENERIC_PHY
+	default y
+
+config AW_CADENCE_COMBOPHY
+	tristate "Allwinner Cadence COMBO PHY Driver"
+	depends on ARCH_SUNXI && OF
+	select GENERIC_PHY
+	default y
+
+config PHY_SUNXI_PLAT
+	tristate "Allwinner Platform USB 3.0 PHY driver"
+	depends on ARCH_SUNXI || COMPILE_TEST
+	select GENERIC_PHY

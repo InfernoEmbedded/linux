@@ -138,9 +138,13 @@ static int sun5i_clkevt_next_event(unsigned long evt,
 				   struct clock_event_device *clkevt)
 {
 	struct sun5i_timer *ce = clkevt_to_sun5i_timer(clkevt);
+	unsigned long delay;
+
+	/* The timer never fires with a zero interval. */
+	delay = evt > TIMER_SYNC_TICKS + 1 ? evt - TIMER_SYNC_TICKS : 1;
 
 	sun5i_clkevt_time_stop(ce, 0);
-	sun5i_clkevt_time_setup(ce, 0, evt - TIMER_SYNC_TICKS);
+	sun5i_clkevt_time_setup(ce, 0, delay);
 	sun5i_clkevt_time_start(ce, 0, false);
 
 	return 0;
@@ -242,7 +246,7 @@ static int sun5i_setup_clockevent(struct platform_device *pdev,
 	writel(val | TIMER_IRQ_EN(0), base + TIMER_IRQ_EN_REG);
 
 	clockevents_config_and_register(&ce->clkevt, rate,
-					TIMER_SYNC_TICKS, 0xffffffff);
+					TIMER_SYNC_TICKS + 1, 0xffffffff);
 
 	ret = devm_request_irq(dev, irq, sun5i_timer_interrupt,
 			       IRQF_TIMER | IRQF_IRQPOLL,

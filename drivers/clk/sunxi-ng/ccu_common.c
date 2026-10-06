@@ -10,6 +10,7 @@
 #include <linux/device.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <linux/slab.h>
 
 #include "ccu_common.h"
@@ -25,7 +26,7 @@ struct sunxi_ccu {
 void ccu_helper_wait_for_lock(struct ccu_common *common, u32 lock)
 {
 	void __iomem *addr;
-	u32 reg;
+	int i;
 
 	if (!lock)
 		return;
@@ -35,7 +36,14 @@ void ccu_helper_wait_for_lock(struct ccu_common *common, u32 lock)
 	else
 		addr = common->base + common->reg;
 
-	WARN_ON(readl_relaxed_poll_timeout(addr, reg, reg & lock, 100, 70000));
+	for (i = 0; i < 100000; i++) {
+		if (readl_relaxed(addr) & lock)
+			return;
+		udelay(1);
+	}
+	if (readl_relaxed(addr) & lock)
+		return;
+	pr_warn("%s: clock lock timeout\n", clk_hw_get_name(&common->hw));
 }
 EXPORT_SYMBOL_NS_GPL(ccu_helper_wait_for_lock, "SUNXI_CCU");
 
@@ -85,8 +93,13 @@ static int ccu_pll_notifier_cb(struct notifier_block *nb,
 	struct ccu_pll_nb *pll = to_ccu_pll_nb(nb);
 	int ret = 0;
 
+	if (pll->once && pll->once_done)
+		return notifier_from_errno(0);
+
 	if (event != POST_RATE_CHANGE)
 		goto out;
+	
+	pll->once_done = 1;
 
 	ccu_gate_helper_disable(pll->common, pll->enable);
 

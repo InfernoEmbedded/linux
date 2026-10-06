@@ -19,6 +19,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-mc.h>
 
@@ -333,6 +334,48 @@ static int __maybe_unused rkisp1_runtime_suspend(struct device *dev)
 	return pinctrl_pm_select_sleep_state(dev);
 }
 
+/*
+ * The NoC QoS generators of the ISP's AXI masters come up at the lowest
+ * priority, and a full-resolution sensor readout that loses memory
+ * arbitration under load corrupts - the ISP cannot stall the sensor.
+ * Raise the priority of the generators listed in the rockchip,qos
+ * property on every resume: they sit inside the ISP's power domain, so
+ * the write must land after the domain is up; the domain driver then
+ * saves and restores the value across later power cycles.
+ */
+#define RKISP1_QOS_PRIORITY		0x08
+#define RKISP1_QOS_PRIORITY_LEVEL_3_3	0x303
+
+static void rkisp1_qos_apply(struct rkisp1_device *rkisp1)
+{
+	unsigned int i;
+
+	for (i = 0; i < rkisp1->qos_count; i++)
+		regmap_write(rkisp1->qos[i], RKISP1_QOS_PRIORITY,
+			     RKISP1_QOS_PRIORITY_LEVEL_3_3);
+}
+
+static void rkisp1_qos_init(struct rkisp1_device *rkisp1)
+{
+	struct device_node *np;
+	struct regmap *regmap;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(rkisp1->qos); i++) {
+		np = of_parse_phandle(rkisp1->dev->of_node, "rockchip,qos", i);
+		if (!np)
+			break;
+		regmap = syscon_node_to_regmap(np);
+		of_node_put(np);
+		if (IS_ERR(regmap)) {
+			dev_warn(rkisp1->dev, "no QoS regmap %u: %ld\n", i,
+				 PTR_ERR(regmap));
+			break;
+		}
+		rkisp1->qos[rkisp1->qos_count++] = regmap;
+	}
+}
+
 static int __maybe_unused rkisp1_runtime_resume(struct device *dev)
 {
 	struct rkisp1_device *rkisp1 = dev_get_drvdata(dev);
@@ -348,6 +391,8 @@ static int __maybe_unused rkisp1_runtime_resume(struct device *dev)
 	rkisp1->irqs_enabled = true;
 	/* Make sure the IRQ handler will see the above */
 	mb();
+
+	rkisp1_qos_apply(rkisp1);
 
 	return 0;
 }
@@ -375,6 +420,16 @@ static int rkisp1_create_links(struct rkisp1_device *rkisp1)
 					    &rkisp1->isp.sd.entity,
 					    RKISP1_ISP_PAD_SINK_VIDEO,
 					    MEDIA_LNK_FL_ENABLED);
+		if (ret)
+			return ret;
+
+		/* ... and to the additional-data capture node. */
+		ret = media_create_pad_link(&rkisp1->csi.sd.entity,
+					    RKISP1_CSI_PAD_SRC,
+					    &rkisp1->addata.vnode.vdev.entity,
+					    0,
+					    MEDIA_LNK_FL_ENABLED |
+					    MEDIA_LNK_FL_IMMUTABLE);
 		if (ret)
 			return ret;
 	}
@@ -420,8 +475,10 @@ static int rkisp1_create_links(struct rkisp1_device *rkisp1)
 
 static void rkisp1_entities_unregister(struct rkisp1_device *rkisp1)
 {
-	if (rkisp1_has_feature(rkisp1, MIPI_CSI2))
+	if (rkisp1_has_feature(rkisp1, MIPI_CSI2)) {
+		rkisp1_addata_unregister(rkisp1);
 		rkisp1_csi_unregister(rkisp1);
+	}
 	rkisp1_params_unregister(rkisp1);
 	rkisp1_stats_unregister(rkisp1);
 	rkisp1_capture_devs_unregister(rkisp1);
@@ -455,6 +512,10 @@ static int rkisp1_entities_register(struct rkisp1_device *rkisp1)
 
 	if (rkisp1_has_feature(rkisp1, MIPI_CSI2)) {
 		ret = rkisp1_csi_register(rkisp1);
+		if (ret)
+			goto error;
+
+		ret = rkisp1_addata_register(rkisp1);
 		if (ret)
 			goto error;
 	}
@@ -710,6 +771,8 @@ static int rkisp1_probe(struct platform_device *pdev)
 	ret = rkisp1_init_pm_domains(rkisp1);
 	if (ret)
 		return ret;
+
+	rkisp1_qos_init(rkisp1);
 
 	if (info->isp_ver == RKISP1_V_IMX8MP) {
 		unsigned int id;

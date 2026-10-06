@@ -15,6 +15,7 @@
 
 #define SUN6I_CSI_EN_REG			0x0
 #define SUN6I_CSI_EN_VER_EN			BIT(30)
+#define SUN6I_CSI_EN_PTN_CYCLE_MASK		GENMASK(23, 16)
 #define SUN6I_CSI_EN_PTN_CYCLE(v)		(((v) << 16) & GENMASK(23, 16))
 #define SUN6I_CSI_EN_SRAM_PWDN			BIT(8)
 #define SUN6I_CSI_EN_PTN_START			BIT(4)
@@ -59,7 +60,21 @@
 #define SUN6I_CSI_CAP_SCAP_ON			BIT(0)
 
 #define SUN6I_CSI_SYNC_CNT_REG			0xc
+
+/*
+ * Two of the pattern generator's fields live in the FIFO threshold register,
+ * which is otherwise nothing to do with it and which the driver never writes:
+ * its reset value 0x040f0400 is what runs, and it already carries a sane
+ * generator delay.
+ */
 #define SUN6I_CSI_FIFO_THRS_REG			0x10
+#define SUN6I_CSI_FIFO_THRS_NEARLY_FULL(v)	(((v) << 26) & GENMASK(28, 26))
+#define SUN6I_CSI_FIFO_THRS_PTN_GEN_CLK_DIV_MASK	GENMASK(25, 24)
+#define SUN6I_CSI_FIFO_THRS_PTN_GEN_CLK_DIV(v)	(((v) << 24) & GENMASK(25, 24))
+#define SUN6I_CSI_FIFO_THRS_PTN_GEN_DLY_MASK	GENMASK(23, 16)
+#define SUN6I_CSI_FIFO_THRS_PTN_GEN_DLY(v)	(((v) << 16) & GENMASK(23, 16))
+#define SUN6I_CSI_FIFO_THRS_THRS(v)		((v) & GENMASK(11, 0))
+
 #define SUN6I_CSI_BT656_HEAD_CFG_REG		0x14
 
 #define SUN6I_CSI_PTN_LEN_REG			0x30

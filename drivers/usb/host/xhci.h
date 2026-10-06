@@ -1487,6 +1487,9 @@ struct xhci_port {
 	int			slot_id;
 	struct completion	rexit_done;
 	struct completion	u3exit_done;
+#ifdef CONFIG_ARCH_SUNXI
+	u32			cleared_change_bits;
+#endif
 };
 
 struct xhci_hub {

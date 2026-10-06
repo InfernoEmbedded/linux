@@ -202,8 +202,8 @@ static int sun8i_a33_mbus_set_dram_freq(struct sun8i_a33_mbus *priv,
 	writel_relaxed(vtfcr, priv->reg_dram + DRAM_VTFCR);
 
 	/* Enable automatic self-refresh at the lowest frequency only. */
-	if (freq == priv->freq_table[0])
-		pwrctl |= DRAM_PWRCTL_SELFREF_EN;
+	// if (freq == priv->freq_table[0])
+	//	pwrctl |= DRAM_PWRCTL_SELFREF_EN;
 	writel_relaxed(pwrctl, priv->reg_dram + DRAM_PWRCTL);
 
 	sun8i_a33_mbus_restart_pmu_counters(priv);

@@ -72,6 +72,8 @@ struct ccu_pll_nb {
 
 	u32	enable;
 	u32	lock;
+	u8	once;		/* Only run the notifier once */
+	u8	once_done;	/* This is set by the notifier callback */
 };
 
 #define to_ccu_pll_nb(_nb) container_of(_nb, struct ccu_pll_nb, clk_nb)

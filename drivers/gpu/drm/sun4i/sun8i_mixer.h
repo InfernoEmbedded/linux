@@ -126,6 +126,13 @@
 /* format 21 is packed YUV444 10-bit */
 
 /*
+ * The DCSC sub-engine converts the mixer's RGB output to YUV, which is what
+ * the TV encoder expects. It is unused on the HDMI path.
+ */
+#define SUN8I_MIXER_DCSC_EN			0xb0000
+#define SUN8I_MIXER_DCSC_COEF_REG(x)		(0xb0010 + 0x4 * (x))
+
+/*
  * Sub-engines listed bellow are unused for now. The EN registers are here only
  * to be used to disable these sub-engines.
  */
@@ -135,7 +142,6 @@
 #define SUN8I_MIXER_PEAK_EN			0xa6000
 #define SUN8I_MIXER_ASE_EN			0xa8000
 #define SUN8I_MIXER_FCC_EN			0xaa000
-#define SUN8I_MIXER_DCSC_EN			0xb0000
 
 #define SUN50I_MIXER_FCE_EN			0x70000
 #define SUN50I_MIXER_PEAK_EN			0x70800
@@ -202,7 +208,6 @@ struct sun8i_mixer_cfg {
 	int			ui_num;
 	unsigned int		de_type;
 	unsigned long		mod_rate;
-	unsigned int		map[6];
 };
 
 struct sun8i_mixer {
@@ -216,7 +221,9 @@ struct sun8i_mixer {
 	struct clk			*mod_clk;
 
 	struct regmap			*top_regs;
-	struct regmap			*disp_regs;
+	struct device			*planes_dev;
+	struct sun4i_drv		*drv;
+	bool				hw_preconfigured;
 };
 
 enum {
@@ -250,13 +257,6 @@ static inline u32
 sun8i_blender_base(struct sun8i_mixer *mixer)
 {
 	return mixer->cfg->de_type == SUN8I_MIXER_DE3 ? DE3_BLD_BASE : DE2_BLD_BASE;
-}
-
-static inline struct regmap *
-sun8i_blender_regmap(struct sun8i_mixer *mixer)
-{
-	return mixer->cfg->de_type == SUN8I_MIXER_DE33 ?
-		mixer->disp_regs : mixer->engine.regs;
 }
 
 static inline u32

@@ -46,6 +46,7 @@ obj-$(CONFIG_PCI_ENDPOINT)	+= endpoint/
 
 obj-y				+= controller/
 obj-y				+= switch/
+obj-y				+= pcie-sunxi/
 
 subdir-ccflags-$(CONFIG_PCI_DEBUG) := -DDEBUG
 

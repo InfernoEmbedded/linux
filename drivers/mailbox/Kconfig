@@ -332,6 +332,15 @@ config SUN6I_MSGBOX
 	  various Allwinner SoCs. This mailbox is used for communication
 	  between the application CPUs and the power management coprocessor.
 
+config SUN55I_MSGBOX
+	tristate "Allwinner sun55i (T527/A523) Message Box"
+	depends on ARCH_SUNXI || COMPILE_TEST
+	default ARCH_SUNXI
+	help
+	  Mailbox implementation for the multi-region hardware message
+	  box present in Allwinner sun55i SoCs (T527/A523). Supports
+	  12 channels across 4 processors (ARM, DSP, CPUS, RV).
+
 config SPRD_MBOX
 	tristate "Spreadtrum Mailbox"
 	depends on ARCH_SPRD || COMPILE_TEST

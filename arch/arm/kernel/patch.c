@@ -99,13 +99,19 @@ void __kprobes __patch_text_real(void *addr, unsigned int insn, bool remap)
 		size = sizeof(u32);
 	}
 
-	if (waddr != addr) {
+	if (waddr != addr)
 		flush_kernel_vmap_range(waddr, twopage ? size / 2 : size);
-		patch_unmap(FIX_TEXT_POKE0, &flags);
-	}
 
 	flush_icache_range((uintptr_t)(addr),
 			   (uintptr_t)(addr) + size);
+
+	/* Can only call 'patch_unmap' after flushing dcache and icache,
+	 * because it calls 'raw_spin_unlock_irqrestore', but that may
+	 * happen to be the very function we're currently patching
+	 * (as it happens during the ftrace init).
+	 */
+	if (waddr != addr)
+		patch_unmap(FIX_TEXT_POKE0, &flags);
 }
 
 static int __kprobes patch_text_stop_machine(void *data)

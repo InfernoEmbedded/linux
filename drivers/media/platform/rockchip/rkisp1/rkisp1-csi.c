@@ -205,6 +205,10 @@ irqreturn_t rkisp1_csi_isr(int irq, void *ctx)
 
 	rkisp1_write(rkisp1, RKISP1_CIF_MIPI_ICR, status);
 
+	if (status & (RKISP1_CIF_MIPI_ADD_DATA_OVFLW |
+		      RKISP1_CIF_MIPI_FRAME_END))
+		rkisp1_addata_isr(rkisp1, status);
+
 	/*
 	 * Disable DPHY errctrl interrupt, because this dphy
 	 * erctrl signal is asserted until the next changes
@@ -217,6 +221,13 @@ irqreturn_t rkisp1_csi_isr(int irq, void *ctx)
 			     val & ~RKISP1_CIF_MIPI_ERR_CTRL(0x0f));
 		rkisp1->csi.is_dphy_errctrl_disabled = true;
 	}
+
+	/*
+	 * The additional-data overflow is not an error of the image path, so
+	 * mask it out of the error accounting and the errctrl re-enable
+	 * condition below.
+	 */
+	status &= ~RKISP1_CIF_MIPI_ADD_DATA_OVFLW;
 
 	/*
 	 * Enable DPHY errctrl interrupt again, if mipi have receive
@@ -233,7 +244,7 @@ irqreturn_t rkisp1_csi_isr(int irq, void *ctx)
 			rkisp1_write(rkisp1, RKISP1_CIF_MIPI_IMSC, val);
 			rkisp1->csi.is_dphy_errctrl_disabled = false;
 		}
-	} else {
+	} else if (status) {
 		rkisp1->debug.mipi_error++;
 	}
 
@@ -361,6 +372,7 @@ static int rkisp1_csi_s_stream(struct v4l2_subdev *sd, int enable)
 	if (!enable) {
 		v4l2_subdev_call(csi->source, video, s_stream, false);
 
+		rkisp1_addata_csi_stop(rkisp1);
 		rkisp1_csi_stop(csi);
 
 		return 0;
@@ -396,8 +408,18 @@ static int rkisp1_csi_s_stream(struct v4l2_subdev *sd, int enable)
 	if (ret)
 		return ret;
 
+	/*
+	 * Set up the additional-data capture before the sensor starts
+	 * emitting: selectors from the sensor's frame descriptor (or the
+	 * add_data_dt override) and a FIFO flush, so that a restart cannot
+	 * inherit a partial packet.
+	 */
+	rkisp1_addata_csi_start(rkisp1, source, source_pad->index,
+				format->mipi_dt);
+
 	ret = v4l2_subdev_call(source, video, s_stream, true);
 	if (ret) {
+		rkisp1_addata_csi_stop(rkisp1);
 		rkisp1_csi_stop(csi);
 		return ret;
 	}

@@ -169,7 +169,7 @@ static inline void musb_h_tx_dma_start(struct musb_hw_ep *ep)
 	/* NOTE: no locks here; caller should lock and select EP */
 	txcsr = musb_readw(ep->regs, MUSB_TXCSR);
 	txcsr |= MUSB_TXCSR_DMAENAB | MUSB_TXCSR_H_WZC_BITS;
-	if (is_cppi_enabled(ep->musb))
+	if (musb_dma_queue_autoadvance(ep->musb))
 		txcsr |= MUSB_TXCSR_DMAMODE;
 	musb_writew(ep->regs, MUSB_TXCSR, txcsr);
 }
@@ -269,7 +269,7 @@ start:
 
 		if (!hw_ep->tx_channel)
 			musb_h_tx_start(hw_ep);
-		else if (is_cppi_enabled(musb) || tusb_dma_omap(musb))
+		else if (musb_dma_engine_managed(musb))
 			musb_h_tx_dma_start(hw_ep);
 	}
 }
@@ -631,10 +631,10 @@ static bool musb_tx_dma_program(struct dma_controller *dma,
 	u16			pkt_size = qh->maxpacket;
 	u8			mode;
 
-	if (musb_dma_inventra(hw_ep->musb) || musb_dma_ux500(hw_ep->musb))
+	if (musb_dma_sw_mode_select(hw_ep->musb))
 		musb_tx_dma_set_mode_mentor(hw_ep, qh,
 					    &length, &mode);
-	else if (is_cppi_enabled(hw_ep->musb) || tusb_dma_omap(hw_ep->musb))
+	else if (musb_dma_engine_managed(hw_ep->musb))
 		musb_tx_dma_set_mode_cppi_tusb(hw_ep, urb, &mode);
 	else
 		return false;
@@ -861,7 +861,7 @@ finish:
 
 		/* kick things off */
 
-		if ((is_cppi_enabled(musb) || tusb_dma_omap(musb)) && dma_channel) {
+		if (musb_dma_engine_managed(musb) && dma_channel) {
 			/* Candidate for DMA */
 			dma_channel->actual_len = 0L;
 			qh->segsize = len;
@@ -1175,8 +1175,6 @@ done:
 }
 
 
-#ifdef CONFIG_USB_INVENTRA_DMA
-
 /* Host side TX (OUT) using Mentor DMA works as follows:
 	submit_urb ->
 		- if queue was empty, Program Endpoint
@@ -1188,8 +1186,6 @@ done:
 		- TxPktRdy has to be set in mode 0 or for
 			short packets in mode 1.
 */
-
-#endif
 
 /* Service a Tx-Available or dma completion irq for the endpoint */
 void musb_host_tx(struct musb *musb, u8 epnum)
@@ -1411,7 +1407,7 @@ done:
 	} else if ((usb_pipeisoc(pipe) || transfer_pending) && dma) {
 		if (musb_tx_dma_program(musb->dma_controller, hw_ep, qh, urb,
 				offset, length)) {
-			if (is_cppi_enabled(musb) || tusb_dma_omap(musb))
+			if (musb_dma_engine_managed(musb))
 				musb_h_tx_dma_start(hw_ep);
 			return;
 		}
@@ -1459,7 +1455,6 @@ done:
 			MUSB_TXCSR_H_WZC_BITS | MUSB_TXCSR_TXPKTRDY);
 }
 
-#ifdef CONFIG_USB_TI_CPPI41_DMA
 /* Seems to set up ISO for cppi41 and not advance len. See commit c57c41d */
 static int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
 				  struct musb_hw_ep *hw_ep,
@@ -1469,12 +1464,11 @@ static int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
 {
 	struct dma_channel *channel = hw_ep->rx_channel;
 	void __iomem *epio = hw_ep->regs;
-	dma_addr_t *buf;
+	dma_addr_t buf;
 	u32 length;
 	u16 val;
 
-	buf = (void *)urb->iso_frame_desc[qh->iso_idx].offset +
-		(u32)urb->transfer_dma;
+	buf = urb->transfer_dma + urb->iso_frame_desc[qh->iso_idx].offset;
 
 	length = urb->iso_frame_desc[qh->iso_idx].length;
 
@@ -1483,21 +1477,9 @@ static int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
 	musb_writew(hw_ep->regs, MUSB_RXCSR, val);
 
 	return dma->channel_program(channel, qh->maxpacket, 0,
-				   (u32)buf, length);
+				   buf, length);
 }
-#else
-static inline int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
-					 struct musb_hw_ep *hw_ep,
-					 struct musb_qh *qh,
-					 struct urb *urb,
-					 size_t len)
-{
-	return false;
-}
-#endif
 
-#if defined(CONFIG_USB_INVENTRA_DMA) || defined(CONFIG_USB_UX500_DMA) || \
-	defined(CONFIG_USB_TI_CPPI41_DMA)
 /* Host side RX (IN) using Mentor DMA works as follows:
 	submit_urb ->
 		- if queue was empty, ProgramEndpoint
@@ -1562,7 +1544,7 @@ static int musb_rx_dma_inventra_cppi41(struct dma_controller *dma,
 			done = true;
 		} else {
 			/* REVISIT: Why ignore return value here? */
-			if (musb_dma_cppi41(hw_ep->musb))
+			if (musb_dma_queue_autoadvance(hw_ep->musb))
 				done = musb_rx_dma_iso_cppi41(dma, hw_ep, qh,
 							      urb, len);
 			done = false;
@@ -1701,26 +1683,6 @@ static int musb_rx_dma_in_inventra_cppi41(struct dma_controller *dma,
 
 	return done;
 }
-#else
-static inline int musb_rx_dma_inventra_cppi41(struct dma_controller *dma,
-					      struct musb_hw_ep *hw_ep,
-					      struct musb_qh *qh,
-					      struct urb *urb,
-					      size_t len)
-{
-	return false;
-}
-
-static inline int musb_rx_dma_in_inventra_cppi41(struct dma_controller *dma,
-						 struct musb_hw_ep *hw_ep,
-						 struct musb_qh *qh,
-						 struct urb *urb,
-						 size_t len,
-						 u8 iso_err)
-{
-	return false;
-}
-#endif
 
 /*
  * Service an RX interrupt for the given IN endpoint; docs cover bulk, iso,
@@ -1850,7 +1812,7 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 	 */
 
 	/* FIXME this is _way_ too much in-line logic for Mentor DMA */
-	if (!musb_dma_inventra(musb) && !musb_dma_ux500(musb) &&
+	if (!(musb->dma_controller && musb_dma_sw_mode_select(musb)) &&
 	    (rx_csr & MUSB_RXCSR_H_REQPKT)) {
 		/* REVISIT this happened for a while on some short reads...
 		 * the cleanup still needs investigation... looks bad...
@@ -1882,8 +1844,8 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 			| MUSB_RXCSR_RXPKTRDY);
 		musb_writew(hw_ep->regs, MUSB_RXCSR, val);
 
-		if (musb_dma_inventra(musb) || musb_dma_ux500(musb) ||
-		    musb_dma_cppi41(musb)) {
+		if (musb_dma_sw_mode_select(musb) ||
+		    musb_dma_queue_autoadvance(musb)) {
 			    done = musb_rx_dma_inventra_cppi41(c, hw_ep, qh, urb, xfer_len);
 			    musb_dbg(hw_ep->musb,
 				    "ep %d dma %s, rxcsr %04x, rxcount %d",
@@ -1911,8 +1873,8 @@ void musb_host_rx(struct musb *musb, u8 epnum)
 		}
 
 		/* we are expecting IN packets */
-		if ((musb_dma_inventra(musb) || musb_dma_ux500(musb) ||
-		    musb_dma_cppi41(musb)) && dma) {
+		if ((musb_dma_sw_mode_select(musb) ||
+		    musb_dma_queue_autoadvance(musb)) && dma) {
 			musb_dbg(hw_ep->musb,
 				"RX%d count %d, buffer 0x%llx len %d/%d",
 				epnum, musb_readw(epio, MUSB_RXCOUNT),

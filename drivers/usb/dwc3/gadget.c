@@ -4880,19 +4880,23 @@ int dwc3_gadget_suspend(struct dwc3 *dwc)
 	int ret;
 
 	ret = dwc3_gadget_soft_disconnect(dwc);
+	if (ret)
+		goto err;
+
+	dwc3_disconnect_gadget_sleepable(dwc);
+
+	return 0;
+
+err:
 	/*
 	 * Attempt to reset the controller's state. Likely no
 	 * communication can be established until the host
 	 * performs a port reset.
 	 */
-	if (ret && dwc->softconnect) {
+	if (dwc->softconnect)
 		dwc3_gadget_soft_connect(dwc);
-		return -EAGAIN;
-	}
 
-	dwc3_disconnect_gadget_sleepable(dwc);
-
-	return 0;
+	return ret;
 }
 
 int dwc3_gadget_resume(struct dwc3 *dwc)

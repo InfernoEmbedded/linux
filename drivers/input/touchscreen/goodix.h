@@ -81,6 +81,7 @@ struct goodix_ts_data {
 	const char *firmware_name;
 	struct touchscreen_properties prop;
 	unsigned int max_touch_num;
+	bool use_dt_irqflags;
 	unsigned int int_trigger_type;
 	struct regulator *avdd28;
 	struct regulator *vddio;
@@ -100,9 +101,12 @@ struct goodix_ts_data {
 	unsigned int contact_size;
 	u8 config[GOODIX_CONFIG_MAX_LENGTH];
 	unsigned short keymap[GOODIX_MAX_KEYS];
+	int num_keys;
 	u8 main_clk[GOODIX_MAIN_CLK_LEN];
 	int bak_ref_len;
 	u8 *bak_ref;
+        struct dentry *debug_root;
+        bool poweroff_in_suspend;
 };
 
 int goodix_i2c_read(struct i2c_client *client, u16 reg, u8 *buf, int len);

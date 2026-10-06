@@ -150,12 +150,16 @@ static int nxp_nci_i2c_nci_read(struct nxp_nci_i2c_phy *phy,
 
 	r = i2c_master_recv(client, (u8 *) &header, NCI_CTRL_HDR_SIZE);
 	if (r < 0) {
+		dev_info(&client->dev, "nfc-mfc-dbg: hdr recv err %d\n", r);
 		goto nci_read_exit;
 	} else if (r != NCI_CTRL_HDR_SIZE) {
 		nfc_err(&client->dev, "Incorrect header length: %u\n", r);
 		r = -EBADMSG;
 		goto nci_read_exit;
 	}
+
+	dev_info(&client->dev, "nfc-mfc-dbg: rx hdr %02x %02x plen=%u\n",
+		 ((u8 *)&header)[0], ((u8 *)&header)[1], header.plen);
 
 	*skb = alloc_skb(NCI_CTRL_HDR_SIZE + header.plen, GFP_KERNEL);
 	if (*skb == NULL) {
@@ -170,6 +174,9 @@ static int nxp_nci_i2c_nci_read(struct nxp_nci_i2c_phy *phy,
 
 	r = i2c_master_recv(client, skb_put(*skb, header.plen), header.plen);
 	if (r < 0) {
+		dev_info(&client->dev,
+			 "nfc-mfc-dbg: payload recv err %d (plen=%u)\n",
+			 r, header.plen);
 		goto nci_read_exit_free_skb;
 	} else if (r != header.plen) {
 		nfc_err(&client->dev,
@@ -178,6 +185,9 @@ static int nxp_nci_i2c_nci_read(struct nxp_nci_i2c_phy *phy,
 		r = -EBADMSG;
 		goto nci_read_exit_free_skb;
 	}
+
+	print_hex_dump(KERN_INFO, "nfc-mfc-dbg rx: ", DUMP_PREFIX_NONE,
+		       32, 1, (*skb)->data, (*skb)->len, false);
 
 	return 0;
 
@@ -375,6 +385,7 @@ static struct i2c_driver nxp_nci_i2c_driver = {
 		   .name = NXP_NCI_I2C_DRIVER_NAME,
 		   .acpi_match_table = ACPI_PTR(acpi_id),
 		   .of_match_table = of_nxp_nci_i2c_match,
+		   .probe_type = PROBE_PREFER_ASYNCHRONOUS,
 		  },
 	.probe = nxp_nci_i2c_probe,
 	.id_table = nxp_nci_i2c_id_table,

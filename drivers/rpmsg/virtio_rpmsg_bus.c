@@ -420,6 +420,14 @@ static struct rpmsg_device *__rpmsg_create_channel(struct virtproc_info *vrp,
 	 */
 	rpdev->announce = rpdev->src != RPMSG_ADDR_ANY;
 
+	/*
+	 * sunxi E906: channels announced by the remote (rpmsg client,
+	 * heartbeat) still need our endpoint address announced back,
+	 * otherwise the remote cannot send data to us.
+	 */
+	if (!strncmp(chinfo->name, "sunxi,", 6))
+		rpdev->announce = true;
+
 	strscpy(rpdev->id.name, chinfo->name, sizeof(rpdev->id.name));
 
 	rpdev->dev.parent = &vrp->vdev->dev;

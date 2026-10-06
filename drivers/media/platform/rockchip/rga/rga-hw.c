@@ -54,10 +54,14 @@ rga_get_corner_addrs(struct rga_frame *frm, struct rga_addrs *addrs,
 	format_info = v4l2_format_info(frm->pix.pixelformat);
 	/* x_div is only used for the u/v planes.
 	 * When the format doesn't have these, use 1 to avoid a division by zero.
+	 * The luma bytes per pixel is part of the ratio as well: it is not 1
+	 * for packed 10-bit formats (NV15), where leaving it out would
+	 * truncate the ratio to zero.
 	 */
 	if (format_info->bpp[1])
-		x_div = format_info->hdiv * format_info->bpp_div[1] /
-			format_info->bpp[1];
+		x_div = format_info->hdiv * format_info->bpp[0] *
+			format_info->bpp_div[1] /
+			(format_info->bpp_div[0] * format_info->bpp[1]);
 	else
 		x_div = 1;
 	y_div = format_info->vdiv;
@@ -194,6 +198,15 @@ static void rga_cmd_set_trans_info(struct rga_ctx *ctx)
 	dst_info.data.swap = out_fmt->color_swap;
 
 	/*
+	 * Packed 10-bit YUV source: the destination path is always 8-bit,
+	 * so also enable rounding of the two dropped bits.
+	 */
+	if (in_fmt->yuv10) {
+		src_info.data.yuv10_e = 1;
+		src_info.data.yuv10_round_e = 1;
+	}
+
+	/*
 	 * CSC mode must only be set when the colorspace families differ between
 	 * input and output. It must remain unset (zeroed) if both are the same.
 	 */
@@ -289,6 +302,19 @@ static void rga_cmd_set_trans_info(struct rga_ctx *ctx)
 		src_info.data.vscl_mode = RGA_SRC_VSCL_MODE_UP;
 		y_factor.data.up_scale_factor =
 			rga_get_scaling(src_h - 1, scale_dst_h - 1);
+	}
+
+	/*
+	 * The 10-bit direct fetch path mis-addresses every other 128-pixel
+	 * tile (it steps by the 8-bit tile size within each 256-pixel pair);
+	 * route unscaled 10-bit blits through the scaler at 1:1 instead,
+	 * like the vendor driver does.
+	 */
+	if (in_fmt->yuv10 && !ctx->rotate && !ctx->hflip && !ctx->vflip) {
+		if (src_info.data.hscl_mode == RGA_SRC_HSCL_MODE_NO)
+			src_info.data.hscl_mode = RGA_SRC_HSCL_MODE_BYPASS;
+		if (src_info.data.vscl_mode == RGA_SRC_VSCL_MODE_NO)
+			src_info.data.vscl_mode = RGA_SRC_VSCL_MODE_BYPASS;
 	}
 
 	/*
@@ -563,7 +589,24 @@ static struct rga_fmt formats[] = {
 		.color_swap = RGA_COLOR_UV_SWAP,
 		.hw_format = RGA_COLOR_FMT_YUV420P,
 	},
+	/* Input only formats last to keep rga_enum_format simple */
+	{
+		.fourcc = V4L2_PIX_FMT_NV15,
+		.color_swap = RGA_COLOR_NONE_SWAP,
+		.hw_format = RGA_COLOR_FMT_YUV420SP,
+		.yuv10 = true,
+	},
 };
+
+/*
+ * Check if the given format can be captured. The packed 10-bit formats are
+ * readable by the source channel only, 10-bit output is not supported by
+ * the hardware.
+ */
+static bool rga_can_capture(const struct rga_fmt *fmt)
+{
+	return !fmt->yuv10;
+}
 
 static void *rga_adjust_and_map_format(struct rga_ctx *ctx,
 				       struct v4l2_pix_format_mplane *format,
@@ -575,6 +618,9 @@ static void *rga_adjust_and_map_format(struct rga_ctx *ctx,
 		return &formats[0];
 
 	for (i = 0; i < ARRAY_SIZE(formats); i++) {
+		if (!is_output && !rga_can_capture(&formats[i]))
+			continue;
+
 		if (formats[i].fourcc == format->pixelformat)
 			return &formats[i];
 	}
@@ -585,10 +631,16 @@ static void *rga_adjust_and_map_format(struct rga_ctx *ctx,
 
 static int rga_enum_format(struct v4l2_fmtdesc *f)
 {
+	struct rga_fmt *fmt;
+
 	if (f->index >= ARRAY_SIZE(formats))
 		return -EINVAL;
 
-	f->pixelformat = formats[f->index].fourcc;
+	fmt = &formats[f->index];
+	if (V4L2_TYPE_IS_CAPTURE(f->type) && !rga_can_capture(fmt))
+		return -EINVAL;
+
+	f->pixelformat = fmt->fourcc;
 	return 0;
 }
 

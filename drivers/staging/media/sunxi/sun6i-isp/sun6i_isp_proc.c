@@ -4,6 +4,7 @@
  * Author: Paul Kocialkowski <paul.kocialkowski@bootlin.com>
  */
 
+#include <linux/interrupt.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <media/v4l2-device.h>
@@ -14,6 +15,23 @@
 #include "sun6i_isp_params.h"
 #include "sun6i_isp_proc.h"
 #include "sun6i_isp_reg.h"
+
+/*
+ * MODE bit 17 selects the sharpening mode, and this driver has always
+ * written 1 -- so every measurement ever taken of the sharpening block on
+ * this part describes mode 1 and nothing is known about mode 0. It cannot
+ * be reached from the poke interface: MODE is staged, written into the
+ * load buffer here at stream start, and a poke to the live copy is
+ * overwritten at the next parameter sync.
+ *
+ * A module parameter rather than a config field because the hardware only
+ * latches this at a frontend start, so there is nothing to be gained from
+ * being able to change it per frame.
+ */
+static unsigned int sun6i_isp_sharp_mode = 1;
+module_param_named(sharp_mode, sun6i_isp_sharp_mode, uint, 0644);
+MODULE_PARM_DESC(sharp_mode, "sharpening mode written to MODE bit 17");
+
 
 /* Helpers */
 
@@ -62,6 +80,48 @@ static const struct sun6i_isp_proc_format sun6i_isp_proc_formats[] = {
 		.mbus_code	= MEDIA_BUS_FMT_SRGGB10_1X10,
 		.input_format	= SUN6I_ISP_INPUT_FMT_RAW_RGGB,
 	},
+
+	{
+		.mbus_code	= MEDIA_BUS_FMT_YUYV8_2X8,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_YUYV,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_YVYU8_2X8,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_YVYU,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_UYVY8_2X8,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_UYVY,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_VYUY8_2X8,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_VYUY,
+	},
+
+	{
+		.mbus_code	= MEDIA_BUS_FMT_YUYV8_1X16,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_YUYV,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_YVYU8_1X16,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_YVYU,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_UYVY8_1X16,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_UYVY,
+	},
+	{
+		.mbus_code	= MEDIA_BUS_FMT_VYUY8_1X16,
+		.input_format	= SUN6I_ISP_INPUT_FMT_YUV422,
+		.input_yuv_seq	= SUN6I_ISP_INPUT_YUV_SEQ_VYUY,
+	},
 };
 
 const struct sun6i_isp_proc_format *sun6i_isp_proc_format_find(u32 mbus_code)
@@ -75,6 +135,31 @@ const struct sun6i_isp_proc_format *sun6i_isp_proc_format_find(u32 mbus_code)
 	return NULL;
 }
 
+static bool
+sun6i_isp_proc_format_bayer(const struct sun6i_isp_proc_format *format)
+{
+	switch (format->input_format) {
+	case SUN6I_ISP_INPUT_FMT_RAW_BGGR:
+	case SUN6I_ISP_INPUT_FMT_RAW_RGGB:
+	case SUN6I_ISP_INPUT_FMT_RAW_GBRG:
+	case SUN6I_ISP_INPUT_FMT_RAW_GRBG:
+		return true;
+	default:
+		return false;
+	}
+}
+
+bool sun6i_isp_proc_bayer(struct sun6i_isp_device *isp_dev)
+{
+	const struct sun6i_isp_proc_format *format;
+
+	format = sun6i_isp_proc_format_find(isp_dev->proc.mbus_format.code);
+	if (WARN_ON(!format))
+		return false;
+
+	return sun6i_isp_proc_format_bayer(format);
+}
+
 /* Processor */
 
 static void sun6i_isp_proc_irq_enable(struct sun6i_isp_device *isp_dev)
@@ -86,8 +171,7 @@ static void sun6i_isp_proc_irq_enable(struct sun6i_isp_device *isp_dev)
 		     SUN6I_ISP_FE_INT_EN_START |
 		     SUN6I_ISP_FE_INT_EN_PARA_SAVE |
 		     SUN6I_ISP_FE_INT_EN_PARA_LOAD |
-		     SUN6I_ISP_FE_INT_EN_SRC0_FIFO |
-		     SUN6I_ISP_FE_INT_EN_ROT_FINISH);
+		     SUN6I_ISP_FE_INT_EN_SRC0_FIFO);
 }
 
 static void sun6i_isp_proc_irq_disable(struct sun6i_isp_device *isp_dev)
@@ -123,21 +207,95 @@ static void sun6i_isp_proc_enable(struct sun6i_isp_device *isp_dev,
 	regmap_write(regmap, SUN6I_ISP_FE_CFG_REG,
 		     SUN6I_ISP_FE_CFG_EN | SUN6I_ISP_FE_CFG_SRC0_MODE(mode));
 
+	/*
+	 * This is a full write rather than a read-modify-write, so it has to
+	 * carry any table reloads the parameters left pending: nothing else
+	 * touches FE_CTRL between here and the first frame.
+	 */
+
 	regmap_write(regmap, SUN6I_ISP_FE_CTRL_REG,
-		     SUN6I_ISP_FE_CTRL_VCAP_EN | SUN6I_ISP_FE_CTRL_PARA_READY);
+		     SUN6I_ISP_FE_CTRL_VCAP_EN | SUN6I_ISP_FE_CTRL_PARA_READY |
+		     sun6i_isp_params_table_update_take(isp_dev));
 }
 
 static void sun6i_isp_proc_disable(struct sun6i_isp_device *isp_dev)
 {
 	struct regmap *regmap = isp_dev->regmap;
+	u32 value;
 
 	/* Frontend */
 
 	regmap_write(regmap, SUN6I_ISP_FE_CTRL_REG, 0);
 	regmap_write(regmap, SUN6I_ISP_FE_CFG_REG, 0);
+
+	/*
+	 * Read back, so that the frontend has really let go before the caller
+	 * acts on it being stopped - the buffers are handed back to userspace
+	 * right after this, and a posted write would let a frame still on its
+	 * way out to memory race the pages being freed.
+	 */
+	regmap_read(regmap, SUN6I_ISP_FE_CFG_REG, &value);
+
+	/*
+	 * Masking the interrupt, which the caller has done by now, does not
+	 * wait for a handler already running on another CPU, and that handler
+	 * completes buffers and stages new ones. The line is shared with the
+	 * CSI on some variants, so this waits for the handler to finish rather
+	 * than disabling the interrupt and stopping the other user with it.
+	 */
+	synchronize_irq(isp_dev->irq);
 }
 
-static void sun6i_isp_proc_configure(struct sun6i_isp_device *isp_dev)
+/*
+ * Start and stop the pipeline, source included.
+ *
+ * Kept apart from .s_stream() so that there is one sequence for bringing the
+ * hardware up and one for taking it down, rather than a copy of each inlined
+ * into the sub-device callback.
+ */
+int sun6i_isp_proc_start(struct sun6i_isp_device *isp_dev)
+{
+	struct sun6i_isp_proc *proc = &isp_dev->proc;
+	int ret;
+
+	if (WARN_ON(!proc->source_active))
+		return -EINVAL;
+
+	/*
+	 * The table addresses are plain registers rather than load buffer
+	 * entries, and the hardware does not keep them across a frontend stop.
+	 * A start that runs without them fetches its parameters from nowhere.
+	 */
+	sun6i_isp_tables_configure(isp_dev);
+
+	sun6i_isp_proc_irq_clear(isp_dev);
+	sun6i_isp_proc_irq_enable(isp_dev);
+
+	/* This sets PARA_READY, so the whole load buffer goes in at once. */
+	sun6i_isp_proc_enable(isp_dev, proc->source_active);
+
+	/* The source is started last, once there is something to receive it. */
+	ret = v4l2_subdev_call(proc->source_subdev_active, video, s_stream, 1);
+	if (ret && ret != -ENOIOCTLCMD) {
+		dev_err(isp_dev->dev, "failed to start the source: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+void sun6i_isp_proc_stop(struct sun6i_isp_device *isp_dev)
+{
+	struct sun6i_isp_proc *proc = &isp_dev->proc;
+
+	sun6i_isp_proc_irq_disable(isp_dev);
+
+	v4l2_subdev_call(proc->source_subdev_active, video, s_stream, 0);
+
+	sun6i_isp_proc_disable(isp_dev);
+}
+
+void sun6i_isp_proc_configure(struct sun6i_isp_device *isp_dev)
 {
 	struct v4l2_mbus_framefmt *mbus_format = &isp_dev->proc.mbus_format;
 	const struct sun6i_isp_proc_format *format;
@@ -158,7 +316,7 @@ static void sun6i_isp_proc_configure(struct sun6i_isp_device *isp_dev)
 	sun6i_isp_load_write(isp_dev, SUN6I_ISP_MODE_REG,
 			     SUN6I_ISP_MODE_INPUT_FMT(format->input_format) |
 			     SUN6I_ISP_MODE_INPUT_YUV_SEQ(format->input_yuv_seq) |
-			     SUN6I_ISP_MODE_SHARP(1) |
+			     SUN6I_ISP_MODE_SHARP(sun6i_isp_sharp_mode) |
 			     SUN6I_ISP_MODE_HIST(2));
 }
 
@@ -192,50 +350,32 @@ static int sun6i_isp_proc_s_stream(struct v4l2_subdev *subdev, int on)
 		source = &proc->source_csi1;
 
 	if (!on) {
-		sun6i_isp_proc_irq_disable(isp_dev);
-		v4l2_subdev_call(source_subdev, video, s_stream, 0);
-		ret = 0;
-		goto disable;
-	}
+		sun6i_isp_proc_stop(isp_dev);
 
-	/* PM */
+		proc->source_active = NULL;
+		proc->source_subdev_active = NULL;
+
+		pm_runtime_put(dev);
+
+		return 0;
+	}
 
 	ret = pm_runtime_resume_and_get(dev);
 	if (ret < 0)
 		return ret;
 
-	/* Clear */
+	proc->source_active = source;
+	proc->source_subdev_active = source_subdev;
 
-	sun6i_isp_proc_irq_clear(isp_dev);
+	ret = sun6i_isp_pipeline_start(isp_dev);
+	if (ret) {
+		sun6i_isp_proc_stop(isp_dev);
 
-	/* Configure */
+		proc->source_active = NULL;
+		proc->source_subdev_active = NULL;
 
-	sun6i_isp_tables_configure(isp_dev);
-	sun6i_isp_params_configure(isp_dev);
-	sun6i_isp_proc_configure(isp_dev);
-	sun6i_isp_capture_configure(isp_dev);
-
-	/* State Update */
-
-	sun6i_isp_state_update(isp_dev, true);
-
-	/* Enable */
-
-	sun6i_isp_proc_irq_enable(isp_dev);
-	sun6i_isp_proc_enable(isp_dev, source);
-
-	ret = v4l2_subdev_call(source_subdev, video, s_stream, 1);
-	if (ret && ret != -ENOIOCTLCMD) {
-		sun6i_isp_proc_irq_disable(isp_dev);
-		goto disable;
+		pm_runtime_put(dev);
 	}
-
-	return 0;
-
-disable:
-	sun6i_isp_proc_disable(isp_dev);
-
-	pm_runtime_put(dev);
 
 	return ret;
 }
@@ -247,13 +387,29 @@ static const struct v4l2_subdev_video_ops sun6i_isp_proc_video_ops = {
 static void
 sun6i_isp_proc_mbus_format_prepare(struct v4l2_mbus_framefmt *mbus_format)
 {
-	if (!sun6i_isp_proc_format_find(mbus_format->code))
-		mbus_format->code = sun6i_isp_proc_formats[0].mbus_code;
+	const struct sun6i_isp_proc_format *format;
+
+	format = sun6i_isp_proc_format_find(mbus_format->code);
+	if (!format) {
+		format = &sun6i_isp_proc_formats[0];
+		mbus_format->code = format->mbus_code;
+	}
 
 	mbus_format->field = V4L2_FIELD_NONE;
-	mbus_format->colorspace = V4L2_COLORSPACE_RAW;
+	mbus_format->colorspace = sun6i_isp_proc_format_bayer(format) ?
+				  V4L2_COLORSPACE_RAW : V4L2_COLORSPACE_SRGB;
 	mbus_format->quantization = V4L2_QUANTIZATION_DEFAULT;
 	mbus_format->xfer_func = V4L2_XFER_FUNC_DEFAULT;
+}
+
+static void
+sun6i_isp_proc_mbus_format_default(struct v4l2_mbus_framefmt *mbus_format)
+{
+	mbus_format->code = sun6i_isp_proc_formats[0].mbus_code;
+	mbus_format->width = 1280;
+	mbus_format->height = 720;
+
+	sun6i_isp_proc_mbus_format_prepare(mbus_format);
 }
 
 static int sun6i_isp_proc_init_state(struct v4l2_subdev *subdev,
@@ -267,11 +423,7 @@ static int sun6i_isp_proc_init_state(struct v4l2_subdev *subdev,
 
 	mutex_lock(lock);
 
-	mbus_format->code = sun6i_isp_proc_formats[0].mbus_code;
-	mbus_format->width = 1280;
-	mbus_format->height = 720;
-
-	sun6i_isp_proc_mbus_format_prepare(mbus_format);
+	sun6i_isp_proc_mbus_format_default(mbus_format);
 
 	mutex_unlock(lock);
 
@@ -500,6 +652,15 @@ int sun6i_isp_proc_setup(struct sun6i_isp_device *isp_dev)
 	int ret;
 
 	mutex_init(&proc->lock);
+
+	/*
+	 * The active format is only ever assigned by set_fmt, so without
+	 * this everything reading it back -- the optical black geometry, the
+	 * input format, the bound on the capture size -- would see zeroes
+	 * until userspace configured the subdev.
+	 */
+
+	sun6i_isp_proc_mbus_format_default(&proc->mbus_format);
 
 	/* V4L2 Subdev */
 

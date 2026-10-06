@@ -470,6 +470,8 @@ static int dw_wdt_init_timeouts(struct dw_wdt *dw_wdt, struct device *dev)
 	data = readl(dw_wdt->regs + WDOG_COMP_PARAMS_1_REG_OFFSET);
 	if (data & WDOG_COMP_PARAMS_1_USE_FIX_TOP) {
 		tops = dw_wdt_fix_tops;
+	} else if (!of_property_present(dev_of_node(dev), "snps,watchdog-tops")) {
+		tops = dw_wdt_fix_tops;
 	} else {
 		ret = of_property_read_variable_u32_array(dev_of_node(dev),
 			"snps,watchdog-tops", of_tops, DW_WDT_NUM_TOPS,

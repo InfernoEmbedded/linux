@@ -176,8 +176,11 @@ static int sunxi_pck600_probe(struct platform_device *pdev)
 		pd->genpd.power_on = sunxi_pck600_power_on;
 		pd->genpd.flags = pd_desc->flags;
 		pd->base = base + PPU_REG_SIZE * i;
+		pd->pck = pck;
 
 		sunxi_pck600_pd_setup(pd, desc);
+		sunxi_pck600_pd_set_power(pd, true);
+		pd->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
 		ret = pm_genpd_init(&pd->genpd, NULL, false);
 		if (ret) {
 			dev_err_probe(dev, ret, "failed to initialize power domain\n");

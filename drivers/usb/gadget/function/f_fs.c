@@ -54,6 +54,9 @@ MODULE_IMPORT_NS("DMA_BUF");
 /* Reference counter handling */
 static void ffs_data_get(struct ffs_data *ffs);
 static void ffs_data_put(struct ffs_data *ffs);
+
+static void ffs_reset_work(struct work_struct *work);
+
 /* Creates new ffs_data object. */
 static struct ffs_data *__must_check ffs_data_new(const char *dev_name)
 	__attribute__((malloc));
@@ -2245,6 +2248,8 @@ static struct ffs_data *ffs_data_new(const char *dev_name)
 	init_waitqueue_head(&ffs->ev.waitq);
 	init_waitqueue_head(&ffs->wait);
 	init_completion(&ffs->ep0req_completion);
+	INIT_WORK(&ffs->reset_work, ffs_reset_work);
+
 	INIT_WORK(&ffs->reset_work, ffs_reset_work);
 
 	/* XXX REVISIT need to update it in some places, or do we? */

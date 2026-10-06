@@ -146,11 +146,63 @@ struct musb_platform_ops {
 #define MUSB_G_NO_SKB_RESERVE	BIT(9)
 #define MUSB_DA8XX		BIT(8)
 #define MUSB_PRESERVE_SESSION	BIT(7)
-#define MUSB_DMA_UX500		BIT(6)
-#define MUSB_DMA_CPPI41		BIT(5)
-#define MUSB_DMA_CPPI		BIT(4)
-#define MUSB_DMA_TUSB_OMAP	BIT(3)
-#define MUSB_DMA_INVENTRA	BIT(2)
+/*
+ * DMA behavioral capabilities. Generic core/host/gadget code queries these
+ * instead of the identity of whichever DMA engine a glue driver wires up; each
+ * glue declares the behaviors its engine needs.
+ *
+ * A capability bit is nonzero only when DMA is compiled in at all (i.e. not
+ * CONFIG_MUSB_PIO_ONLY) and at least one engine that needs it is built in;
+ * otherwise it falls through to 0, so the musb_dma_*() accessors fold to a
+ * compile-time 0 and that behavior's code is dead-code eliminated.
+ *
+ * MUSB_DMA_SW_MODE_SELECT: driver selects DMA mode 0/1 and drives CSR
+ * MUSB_DMA_ENGINE_MANAGED: engine drives the transfer; needs tx_dma_start
+ * MUSB_DMA_QUEUE_AUTOADVANCE: engine keeps advancing its queue past short
+ * packets, so HW acks short RX and the driver must not (the only such engine is
+ * CPPI 4.1)
+ * MUSB_DMA_RX_MODE_AUTOCLEAR: gadget RX: AutoClear-then-mode sequence
+ * MUSB_DMA_RX_MODE1_ALWAYS: gadget RX: use DMA Mode 1 for any full-packet
+ * DMA-mapped transfer, not only when the function set short_not_ok. The
+ * Allwinner A64 idma only moves data with the Mode 1 (AUTOCLEAR) RXCSR setup;
+ * the Mentor Mode 0 setup leaves AUTOCLEAR clear and the engine transfers
+ * nothing. Only the Allwinner idma needs this, so it is gated on that engine
+ * and never alters RX handling for the other engines.
+ */
+#ifndef CONFIG_MUSB_PIO_ONLY
+#if defined(CONFIG_USB_INVENTRA_DMA) || defined(CONFIG_USB_UX500_DMA) || \
+	defined(CONFIG_USB_SUNXI_IDMA) || defined(CONFIG_USB_SUNXI_DDMA)
+#define MUSB_DMA_SW_MODE_SELECT		BIT(5)
+#endif
+#if defined(CONFIG_USB_TI_CPPI41_DMA) || defined(CONFIG_USB_TUSB_OMAP_DMA)
+#define MUSB_DMA_ENGINE_MANAGED		BIT(4)
+#endif
+#ifdef CONFIG_USB_TI_CPPI41_DMA
+#define MUSB_DMA_QUEUE_AUTOADVANCE	BIT(3)
+#endif
+#ifdef CONFIG_USB_UX500_DMA
+#define MUSB_DMA_RX_MODE_AUTOCLEAR	BIT(2)
+#endif
+#ifdef CONFIG_USB_SUNXI_IDMA
+#define MUSB_DMA_RX_MODE1_ALWAYS	BIT(6)
+#endif
+#endif /* !CONFIG_MUSB_PIO_ONLY */
+
+#ifndef MUSB_DMA_SW_MODE_SELECT
+#define MUSB_DMA_SW_MODE_SELECT		0
+#endif
+#ifndef MUSB_DMA_ENGINE_MANAGED
+#define MUSB_DMA_ENGINE_MANAGED		0
+#endif
+#ifndef MUSB_DMA_QUEUE_AUTOADVANCE
+#define MUSB_DMA_QUEUE_AUTOADVANCE	0
+#endif
+#ifndef MUSB_DMA_RX_MODE_AUTOCLEAR
+#define MUSB_DMA_RX_MODE_AUTOCLEAR	0
+#endif
+#ifndef MUSB_DMA_RX_MODE1_ALWAYS
+#define MUSB_DMA_RX_MODE1_ALWAYS	0
+#endif
 #define MUSB_IN_TUSB		BIT(1)
 #define MUSB_INDEXED_EP		BIT(0)
 	u32	quirks;
@@ -288,6 +340,17 @@ struct musb {
 	struct delayed_work	deassert_reset_work;
 	struct delayed_work	finish_resume_work;
 	struct delayed_work	gadget_work;
+
+	/*
+	 * Deferred gadget request completions: rxstate() parks PIO requests
+	 * completed from the queue()/set_halt() kick paths here so the gadget
+	 * callback runs from softirq (like the IRQ-driven completions) instead
+	 * of synchronously on the caller's stack.  A tasklet, not a workqueue:
+	 * this is hot for short-packet OUT traffic (cdc_eem RX, pipelined
+	 * CBWs) and must not be starved by system_wq.
+	 */
+	struct tasklet_struct	gb_tasklet;
+	struct list_head	gb_list;
 	u16			hwvers;
 
 	u16			intrrxe;

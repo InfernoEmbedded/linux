@@ -32,7 +32,7 @@ static const struct regmap_range ac100_writeable_ranges[] = {
 	regmap_reg_range(AC100_ADC_DIG_CTRL, AC100_ADC_VOL_CTRL),
 	regmap_reg_range(AC100_HMIC_CTRL1, AC100_HMIC_STATUS),
 	regmap_reg_range(AC100_DAC_DIG_CTRL, AC100_DAC_MXR_GAIN),
-	regmap_reg_range(AC100_ADC_APC_CTRL, AC100_LINEOUT_CTRL),
+	regmap_reg_range(AC100_ADC_APC_CTRL, AC100_ADDA_TUNE3),
 	regmap_reg_range(AC100_ADC_DAP_L_CTRL, AC100_ADC_DAP_OPT),
 	regmap_reg_range(AC100_DAC_DAP_CTRL, AC100_DAC_DAP_OPT),
 	regmap_reg_range(AC100_ADC_DAP_ENA, AC100_DAC_DAP_ENA),
@@ -79,6 +79,9 @@ static struct mfd_cell ac100_cells[] = {
 	{
 		.name		= "ac100-codec",
 		.of_compatible	= "x-powers,ac100-codec",
+	}, {
+		.name		= "ac100-codec-analog",
+		.of_compatible	= "x-powers,ac100-codec-analog",
 	}, {
 		.name		= "ac100-rtc",
 		.of_compatible	= "x-powers,ac100-rtc",

@@ -270,6 +270,13 @@ int __hci_cmd_sync_status_sk(struct hci_dev *hdev, u16 opcode, u32 plen,
 		if (!event)
 			bt_dev_err(hdev, "Opcode 0x%4.4x failed: %ld", opcode,
 				   PTR_ERR(skb));
+
+		/* Ignore -22 for WRITE_DEF_LINK_POLICY - some controllers
+		 * report it as supported but reject it (e.g., Marlin/uwe5622)
+		 */
+		if (PTR_ERR(skb) == -EINVAL && opcode == 0x080f)
+			return 0;
+
 		return PTR_ERR(skb);
 	}
 
@@ -4349,7 +4356,7 @@ static int hci_setup_link_policy_sync(struct hci_dev *hdev)
 		link_policy |= HCI_LP_HOLD;
 	if (lmp_sniff_capable(hdev))
 		link_policy |= HCI_LP_SNIFF;
-	if (lmp_park_capable(hdev))
+	if (lmp_park_capable(hdev) && !hci_test_quirk(hdev, HCI_QUIRK_BROKEN_PARK_LINK_STATUS))
 		link_policy |= HCI_LP_PARK;
 
 	cp.policy = cpu_to_le16(link_policy);

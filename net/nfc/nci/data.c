@@ -282,8 +282,16 @@ void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb)
 		 nci_conn_id(skb->data),
 		 nci_plen(skb->data));
 
+	pr_info("nfc-mfc-dbg: rx data pbf=%d conn=%d plen=%d prot=%d len=%d\n",
+		pbf, conn_id, nci_plen(skb->data),
+		ndev->target_active_prot, skb->len);
+	print_hex_dump(KERN_INFO, "nfc-mfc-dbg data: ", DUMP_PREFIX_NONE,
+		       32, 1, skb->data, skb->len, false);
+
 	conn_info = nci_get_conn_info_by_conn_id(ndev, nci_conn_id(skb->data));
 	if (!conn_info) {
+		pr_info("nfc-mfc-dbg: no conn_info for conn=%d, dropping\n",
+			conn_id);
 		kfree_skb(skb);
 		return;
 	}
@@ -299,6 +307,8 @@ void nci_rx_data_packet(struct nci_dev *ndev, struct sk_buff *skb)
 		pr_debug("frame I/F => remove the status byte\n");
 		status = skb->data[skb->len - 1];
 		skb_trim(skb, (skb->len - 1));
+		pr_info("nfc-mfc-dbg: mifare strip status=%02x len_now=%d\n",
+			status, skb->len);
 	}
 
 	nci_add_rx_data_frag(ndev, skb, pbf, conn_id, nci_to_errno(status));

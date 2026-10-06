@@ -379,6 +379,19 @@ config XLNX_R5_REMOTEPROC
 
 	  It's safe to say N if not interested in using RPU r5f cores.
 
+config SUN55I_E906_REMOTEPROC
+	tristate "Allwinner sun55i E906 remoteproc support"
+	depends on ARCH_SUNXI || COMPILE_TEST
+	depends on REMOTEPROC
+	select MAILBOX
+	help
+	  Say y here to support the Allwinner sun55i E906 RISC-V remote
+	  processor via the remote processor framework. An ELF firmware can
+	  be loaded thanks to sysfs remoteproc entries. The remote processor
+	  can be started and stopped.
+
+	  This can be either built-in or a loadable module.
+
 endif # REMOTEPROC
 
 endmenu

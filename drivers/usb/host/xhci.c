@@ -16,6 +16,7 @@
 #include <linux/log2.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/of.h>
 #include <linux/slab.h>
 #include <linux/string_choices.h>
 #include <linux/dmi.h>
@@ -180,6 +181,9 @@ int xhci_start(struct xhci_hcd *xhci)
  */
 int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us)
 {
+#ifdef CONFIG_ARCH_SUNXI
+	void __iomem *sunxi_subsys = NULL;
+#endif
 	u32 command;
 	u32 state;
 	int ret;
@@ -197,6 +201,21 @@ int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us)
 		return 0;
 	}
 
+#ifdef CONFIG_ARCH_SUNXI
+	if (of_machine_is_compatible("allwinner,sun60i-a733")) {
+		sunxi_subsys = ioremap(0x06c00008, 0x4);
+		if (sunxi_subsys) {
+			u32 val = readl(sunxi_subsys);
+			/* DWC3 internal reset requires CCU PIPE clock (Bit 20 = 1) */
+			if ((val & 0x00100000) == 0) {
+				writel(val | 0x00100000, sunxi_subsys);
+				xhci_info(xhci, "[SUNXI-A733] Restored CCU PIPE clock for reset: 0x06c00008=0x%08x\n",
+					  readl(sunxi_subsys));
+			}
+		}
+	}
+#endif
+
 	xhci_dbg_trace(xhci, trace_xhci_dbg_init, "// Reset the HC");
 	command = readl(&xhci->op_regs->command);
 	command |= CMD_RESET;
@@ -213,8 +232,13 @@ int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us)
 		udelay(1000);
 
 	ret = xhci_handshake(&xhci->op_regs->command, CMD_RESET, 0, timeout_us);
-	if (ret)
+	if (ret) {
+#ifdef CONFIG_ARCH_SUNXI
+		if (sunxi_subsys)
+			iounmap(sunxi_subsys);
+#endif
 		return ret;
+	}
 
 	if (xhci->quirks & XHCI_ASMEDIA_MODIFY_FLOWCONTROL)
 		usb_asmedia_modifyflowcontrol(to_pci_dev(xhci_to_hcd(xhci)->self.controller));
@@ -226,6 +250,16 @@ int xhci_reset(struct xhci_hcd *xhci, u64 timeout_us)
 	 * than status until the "Controller Not Ready" flag is cleared.
 	 */
 	ret = xhci_handshake(&xhci->op_regs->status, STS_CNR, 0, timeout_us);
+
+#ifdef CONFIG_ARCH_SUNXI
+	if (sunxi_subsys) {
+		/* Handover PIPE clock to Combo PHY 0 SerDes 250MHz (Bit 20 = 0) */
+		writel(readl(sunxi_subsys) & ~0x00100000, sunxi_subsys);
+		xhci_info(xhci, "[SUNXI-A733] Handed over PIPE clock to SerDes PHY: 0x06c00008=0x%08x\n",
+			  readl(sunxi_subsys));
+		iounmap(sunxi_subsys);
+	}
+#endif
 
 	xhci->usb2_rhub.bus_state.port_c_suspend = 0;
 	xhci->usb2_rhub.bus_state.suspended_ports = 0;
@@ -575,6 +609,81 @@ static void xhci_init(struct usb_hcd *hcd)
 
 /*-------------------------------------------------------------------------*/
 
+#ifdef CONFIG_ARCH_SUNXI
+static void sunxi_a733_xhci_post_start(struct xhci_hcd *xhci)
+{
+	void __iomem *top_combo;
+	void __iomem *gpio_pb;
+	struct xhci_port *port;
+	struct device *dev = xhci_to_hcd(xhci)->self.controller;
+	u32 portsc, pls;
+	int i;
+
+	if (!of_machine_is_compatible("allwinner,sun60i-a733"))
+		return;
+
+	if (dev_is_pci(dev) || !dev->parent ||
+	    !of_device_is_compatible(dev->parent->of_node, "snps,dwc3"))
+		return;
+
+	top_combo = ioremap(0x06c06100, 0x8);
+	if (top_combo) {
+		/* Re-toggle SerDes PIPE mapping to give DWC3 a clean clock edge */
+		writel(0x0000000f, top_combo + 0x0000);
+		writel(0x0000000f, top_combo + 0x0004);
+		usleep_range(5000, 10000);
+		writel(0x00000000, top_combo + 0x0000);
+		writel(0x00000000, top_combo + 0x0004);
+		iounmap(top_combo);
+		xhci_info(xhci, "[SUNXI-A733] Toggled top combo PIPE mapping (0x06c06100=0)\n");
+	}
+
+	/* Power-cycle VBUS on PB7 so attached USB 3.0 device undergoes clean POR
+	 * while DWC3 and SerDes PHY are actively listening in RxDetect */
+	gpio_pb = ioremap(0x02000100, 0x20);
+	if (gpio_pb) {
+		u32 val = readl(gpio_pb + 0x10);
+		/* Cut off VBUS: PB7 = 1 (active-low via Q37 inverter) */
+		writel(val | (1 << 7), gpio_pb + 0x10);
+		xhci_info(xhci, "[SUNXI-A733] VBUS pulsed OFF for device power-on reset\n");
+		msleep(1500);
+		/* Turn ON VBUS: PB7 = 0 */
+		val = readl(gpio_pb + 0x10);
+		writel(val & ~(1 << 7), gpio_pb + 0x10);
+		xhci_info(xhci, "[SUNXI-A733] VBUS pulsed ON (0x02000110=0x%08x)\n",
+			  readl(gpio_pb + 0x10));
+		iounmap(gpio_pb);
+	}
+
+	/* Poll for link training into U0 (0x00001203 / 0x0A001203) */
+	if (xhci->usb3_rhub.num_ports > 0 && xhci->usb3_rhub.ports[0]) {
+		port = xhci->usb3_rhub.ports[0];
+		for (i = 0; i < 30; i++) {
+			msleep(100);
+			portsc = xhci_portsc_readl(port);
+			pls = portsc & PORT_PLS_MASK;
+			if (pls == XDEV_U0 || (portsc & PORT_CONNECT)) {
+				xhci_info(xhci, "[SUNXI-A733] SuperSpeed link trained to U0! PORTSC=0x%08x (after %d ms)\n",
+					  portsc, (i + 1) * 100);
+				break;
+			}
+		}
+
+		portsc = xhci_portsc_readl(port);
+		pls = portsc & PORT_PLS_MASK;
+		xhci_info(xhci, "[SUNXI-A733] Final Post-start Port 2 PORTSC=0x%08x (PLS=%u)\n",
+			  portsc, pls >> 5);
+		if (pls != XDEV_U0) {
+			u32 temp = xhci_port_state_to_neutral(portsc);
+			temp |= PORT_WR;
+			xhci_portsc_writel(port, temp);
+			xhci_info(xhci, "[SUNXI-A733] Non-U0 link; triggered Warm Port Reset on Port 2: 0x%08x\n",
+				  xhci_portsc_readl(port));
+		}
+	}
+}
+#endif
+
 static int xhci_run_finished(struct xhci_hcd *xhci)
 {
 	struct xhci_interrupter *ir = xhci->interrupters[0];
@@ -607,6 +716,10 @@ static int xhci_run_finished(struct xhci_hcd *xhci)
 		xhci_ring_cmd_db(xhci);
 
 	spin_unlock_irqrestore(&xhci->lock, flags);
+
+#ifdef CONFIG_ARCH_SUNXI
+	sunxi_a733_xhci_post_start(xhci);
+#endif
 
 	return 0;
 }

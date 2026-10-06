@@ -113,3 +113,5 @@ config CRYPTO_DEV_SUN8I_SS_HASH
 	select CRYPTO_SHA256
 	help
 	  Say y to enable support for hash algorithms.
+
+source "drivers/crypto/allwinner/sunxi-ce/Kconfig"

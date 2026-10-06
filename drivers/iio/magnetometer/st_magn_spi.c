@@ -93,6 +93,11 @@ static const struct spi_device_id st_magn_id_table[] = {
 	{ LSM9DS1_MAGN_DEV_NAME },
 	{ IIS2MDC_MAGN_DEV_NAME },
 	{ LSM303C_MAGN_DEV_NAME },
+	/* aliases matching the -magn compatible strings */
+	{ "lis3mdl-magn" },
+	{ "lsm303agr-magn" },
+	{ "lsm9ds1-magn" },
+	{ "lsm303c-magn" },
 	{ }
 };
 MODULE_DEVICE_TABLE(spi, st_magn_id_table);

@@ -84,6 +84,7 @@ static struct sunxi_desc_pin *init_pins_table(struct device *dev,
 	 * Find the total number of pins.
 	 * Also work out how much memory we need to store all the pin names.
 	 */
+	desc->npins = 0;
 	for (i = 0; i < SUNXI_PINCTRL_MAX_BANKS; i++) {
 		desc->npins += pins_per_bank[i];
 		if (pins_per_bank[i] < 10) {
@@ -168,7 +169,7 @@ static int prepare_function_table(struct device *dev, struct device_node *pnode,
 		struct sunxi_desc_pin *pin = &pins[i];
 		int bank = (pin->pin.number - pin_base) / PINS_PER_BANK;
 
-		if (irq_bank_muxes[bank]) {
+		if (bank >= 0 && bank < SUNXI_PINCTRL_MAX_BANKS && irq_bank_muxes[bank]) {
 			pin->variant++;
 			num_funcs++;
 		}
@@ -213,7 +214,7 @@ static int prepare_function_table(struct device *dev, struct device_node *pnode,
 		struct sunxi_desc_pin *pin = &pins[i];
 		int bank = (pin->pin.number - pin_base) / PINS_PER_BANK;
 		int lastfunc = pin->variant + 1;
-		int irq_mux = irq_bank_muxes[bank];
+		int irq_mux = (bank >= 0 && bank < SUNXI_PINCTRL_MAX_BANKS) ? irq_bank_muxes[bank] : 0;
 
 		func[0].name = "gpio_in";
 		func[0].muxval = 0;

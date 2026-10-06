@@ -1724,4 +1724,54 @@ static_assert((sizeof(struct rkisp1_ext_params_cfg) -
 	      sizeof(struct v4l2_isp_params_buffer));
 #endif /* __KERNEL__ */
 
+/*---------- PART 4: MIPI additional-data capture ------------*/
+
+/*
+ * The MIPI receiver can divert CSI-2 long packets whose (VC, DT) matches one
+ * of its four additional-data selectors into a CPU-read FIFO, separate from
+ * the image path. Sensors use such packets for out-of-band data - the IMX258
+ * emits its shield-pixel (PDAF) samples this way, with data type 0x2f, during
+ * line blanking.
+ *
+ * The rkisp1_addata video node (V4L2_META_FMT_RK_ISP1_ADDATA) delivers one
+ * buffer per frame: struct rkisp1_addata_hdr followed by @data_bytes of
+ * verbatim FIFO content - a sequence of packets, each one the 4-byte MIPI
+ * long-packet header (data id, 16-bit word count little-endian, ECC) followed
+ * by its payload padded to a 4-byte boundary. The buffer always ends on a
+ * whole packet. Nothing about the payload is interpreted by the kernel.
+ *
+ * fmt.meta.buffersize is the maximum per-frame capture and may be requested
+ * with S_FMT (the driver clamps it); the amount actually captured varies per
+ * frame with the sensor configuration and is reported in bytesused and
+ * @data_bytes. A frame in which nothing was captured is still delivered,
+ * with @num_packets = 0. v4l2_buffer.sequence carries the ISP frame number.
+ */
+
+/* the hardware FIFO overflowed mid-frame; the data is a clean prefix */
+#define RKISP1_ADDATA_FLAG_HW_OVERFLOW		(1U << 0)
+/* the capture buffer filled up; the data is a clean prefix */
+#define RKISP1_ADDATA_FLAG_TRUNCATED		(1U << 1)
+/* packet framing did not parse; the FIFO was flushed to resynchronize */
+#define RKISP1_ADDATA_FLAG_SYNC_LOST		(1U << 2)
+
+/**
+ * struct rkisp1_addata_hdr - MIPI additional-data capture buffer header
+ *
+ * @version: buffer layout version, currently 1
+ * @flags: RKISP1_ADDATA_FLAG_* bits
+ * @num_packets: number of whole packets in the stream
+ * @data_bytes: bytes of packet stream following this header
+ * @dropped_bytes: bytes lost this frame (overflow, truncation, desync);
+ *		   best effort, the hardware does not count its own losses
+ * @reserved: zeroed
+ */
+struct rkisp1_addata_hdr {
+	__u32 version;
+	__u32 flags;
+	__u32 num_packets;
+	__u32 data_bytes;
+	__u32 dropped_bytes;
+	__u32 reserved[3];
+};
+
 #endif /* _UAPI_RKISP1_CONFIG_H */

@@ -18,11 +18,13 @@
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
+#include <linux/pm_runtime.h>
 #include <linux/platform_data/x86/soc.h>
 #include <linux/slab.h>
 #include <linux/acpi.h>
 #include <linux/of.h>
 #include <linux/unaligned.h>
+#include <linux/debugfs.h>
 #include "goodix.h"
 
 #define GOODIX_GPIO_INT_NAME		"irq"
@@ -34,6 +36,8 @@
 #define GOODIX_CONTACT_SIZE		8
 #define GOODIX_MAX_CONTACT_SIZE		9
 #define GOODIX_MAX_CONTACTS		10
+
+#define GOODIX_AUTOSUSPEND_DELAY_MS	500
 
 #define GOODIX_CONFIG_MIN_LENGTH	186
 #define GOODIX_CONFIG_911_LENGTH	186
@@ -309,6 +313,21 @@ static int goodix_ts_read_input_report(struct goodix_ts_data *ts, u8 *data)
 	return -ENOMSG;
 }
 
+static int goodix_input_open(struct input_dev *dev)
+{
+	struct goodix_ts_data *ts = input_get_drvdata(dev);
+
+	return pm_runtime_resume_and_get(&ts->client->dev);
+}
+
+static void goodix_input_close(struct input_dev *dev)
+{
+	struct goodix_ts_data *ts = input_get_drvdata(dev);
+
+	pm_runtime_mark_last_busy(&ts->client->dev);
+	pm_runtime_put_autosuspend(&ts->client->dev);
+}
+
 static int goodix_create_pen_input(struct goodix_ts_data *ts)
 {
 	struct device *dev = &ts->client->dev;
@@ -342,6 +361,10 @@ static int goodix_create_pen_input(struct goodix_ts_data *ts)
 	if (kstrtou16(ts->id, 10, &input->id.product))
 		input->id.product = 0x1001;
 	input->id.version = ts->version;
+
+	input_set_drvdata(input, ts);
+	input->open = goodix_input_open;
+	input->close = goodix_input_close;
 
 	ts->input_pen = input;
 	return 0;
@@ -435,7 +458,7 @@ static void goodix_ts_release_keys(struct goodix_ts_data *ts)
 {
 	int i;
 
-	for (i = 0; i < GOODIX_MAX_KEYS; i++)
+	for (i = 0; i < ts->num_keys; i++)
 		input_report_key(ts->input_dev, ts->keymap[i], 0);
 }
 
@@ -448,7 +471,7 @@ static void goodix_ts_report_key(struct goodix_ts_data *ts, u8 *data)
 	if (data[0] & GOODIX_HAVE_KEY) {
 		touch_num = data[0] & 0x0f;
 		key_value = data[1 + ts->contact_size * touch_num];
-		for (i = 0; i < GOODIX_MAX_KEYS; i++)
+		for (i = 0; i < ts->num_keys; i++)
 			if (key_value & BIT(i))
 				input_report_key(ts->input_dev,
 						 ts->keymap[i], 1);
@@ -543,12 +566,17 @@ static void goodix_free_irq(struct goodix_ts_data *ts)
 
 static int goodix_request_irq(struct goodix_ts_data *ts)
 {
+	unsigned long irq_flags = ts->irq_flags;
+
 	if (!ts->client->irq)
 		return 0;
 
+	if (ts->use_dt_irqflags)
+		irq_flags = IRQF_ONESHOT;
+
 	return devm_request_threaded_irq(&ts->client->dev, ts->client->irq,
 					 NULL, goodix_ts_irq_handler,
-					 ts->irq_flags, ts->client->name, ts);
+					 irq_flags, ts->client->name, ts);
 }
 
 static int goodix_check_cfg_8(struct goodix_ts_data *ts, const u8 *cfg, int len)
@@ -1029,6 +1057,16 @@ retry_get_irq_gpio:
 	return 0;
 }
 
+static int ts_config_bin_show(struct seq_file *s, void *data)
+{
+        struct goodix_ts_data *ts = s->private;
+
+        seq_write(s, ts->config, ts->chip->config_len);
+
+        return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ts_config_bin);
+
 /**
  * goodix_read_config - Read the embedded configuration of the panel
  *
@@ -1068,6 +1106,10 @@ static void goodix_read_config(struct goodix_ts_data *ts)
 	}
 
 	ts->chip->calc_config_checksum(ts);
+
+        ts->debug_root = debugfs_create_dir("goodix", NULL);
+        debugfs_create_file("config.bin", 0444, ts->debug_root, ts,
+                            &ts_config_bin_fops);
 }
 
 /**
@@ -1151,18 +1193,49 @@ static int goodix_configure_dev(struct goodix_ts_data *ts)
 		ts->input_dev->id.product = 0x1001;
 	ts->input_dev->id.version = ts->version;
 
-	ts->input_dev->keycode = ts->keymap;
-	ts->input_dev->keycodesize = sizeof(ts->keymap[0]);
-	ts->input_dev->keycodemax = GOODIX_MAX_KEYS;
+	/*
+	 * Capacitive Windows/Home button on some devices. Only advertise
+	 * the keys where they can exist: DT boards must list them in
+	 * linux,keycodes, non-DT (ACPI) devices keep the default keymap.
+	 * Advertising KEY_* capabilities on pure touchscreens makes the VT
+	 * keyboard handler attach to and open the device, defeating the
+	 * open-gated runtime PM.
+	 */
+	if (device_property_present(&ts->client->dev, "linux,keycodes")) {
+		u32 keycodes[GOODIX_MAX_KEYS];
+		int nkeys;
 
-	/* Capacitive Windows/Home button on some devices */
-	for (i = 0; i < GOODIX_MAX_KEYS; ++i) {
-		if (i == 0)
-			ts->keymap[i] = KEY_LEFTMETA;
-		else
-			ts->keymap[i] = KEY_F1 + (i - 1);
+		nkeys = device_property_count_u32(&ts->client->dev,
+						  "linux,keycodes");
+		if (nkeys > 0) {
+			nkeys = min(nkeys, GOODIX_MAX_KEYS);
+			error = device_property_read_u32_array(&ts->client->dev,
+							       "linux,keycodes",
+							       keycodes, nkeys);
+			if (!error) {
+				ts->num_keys = nkeys;
+				for (i = 0; i < ts->num_keys; i++)
+					ts->keymap[i] = keycodes[i];
+			}
+		}
+	} else if (!dev_of_node(&ts->client->dev)) {
+		ts->num_keys = GOODIX_MAX_KEYS;
+		for (i = 0; i < ts->num_keys; ++i) {
+			if (i == 0)
+				ts->keymap[i] = KEY_LEFTMETA;
+			else
+				ts->keymap[i] = KEY_F1 + (i - 1);
+		}
+	}
 
-		input_set_capability(ts->input_dev, EV_KEY, ts->keymap[i]);
+	if (ts->num_keys) {
+		ts->input_dev->keycode = ts->keymap;
+		ts->input_dev->keycodesize = sizeof(ts->keymap[0]);
+		ts->input_dev->keycodemax = ts->num_keys;
+
+		for (i = 0; i < ts->num_keys; i++)
+			input_set_capability(ts->input_dev, EV_KEY,
+					     ts->keymap[i]);
 	}
 
 	input_set_capability(ts->input_dev, EV_ABS, ABS_MT_POSITION_X);
@@ -1222,6 +1295,8 @@ retry_read_config:
 	}
 
 	input_set_drvdata(ts->input_dev, ts);
+	ts->input_dev->open = goodix_input_open;
+	ts->input_dev->close = goodix_input_close;
 
 	if (!ts->client->irq) {
 		error = input_setup_polling(ts->input_dev, goodix_ts_work_i2c_poll);
@@ -1233,11 +1308,27 @@ retry_read_config:
 		input_set_poll_interval(ts->input_dev, GOODIX_POLL_INTERVAL_MS);
 	}
 
+	/*
+	 * Enable runtime power management before registering the input
+	 * devices: input handlers may open the device right during
+	 * registration and the open callback resumes the device through
+	 * runtime PM. The device is suspended when no one has the input
+	 * device open, and resumed on open. Keep it active across the
+	 * registration, then drop the reference so autosuspend can kick
+	 * in when the device stays unopened.
+	 */
+	pm_runtime_set_autosuspend_delay(&ts->client->dev,
+					 GOODIX_AUTOSUSPEND_DELAY_MS);
+	pm_runtime_use_autosuspend(&ts->client->dev);
+	pm_runtime_set_active(&ts->client->dev);
+	pm_runtime_get_noresume(&ts->client->dev);
+	pm_runtime_enable(&ts->client->dev);
+
 	error = input_register_device(ts->input_dev);
 	if (error) {
 		dev_err(&ts->client->dev,
 			"Failed to register input device: %d", error);
-		return error;
+		goto err_pm;
 	}
 
 	/*
@@ -1249,16 +1340,27 @@ retry_read_config:
 	 */
 	error = goodix_create_pen_input(ts);
 	if (error)
-		return error;
+		goto err_pm;
 
 	ts->irq_flags = goodix_irq_flags[ts->int_trigger_type] | IRQF_ONESHOT;
 	error = goodix_request_irq(ts);
 	if (error) {
 		dev_err(&ts->client->dev, "request IRQ failed: %d\n", error);
-		return error;
+		goto err_pm;
 	}
 
+	pm_runtime_mark_last_busy(&ts->client->dev);
+	pm_runtime_put_autosuspend(&ts->client->dev);
+
 	return 0;
+
+err_pm:
+	/* The device is still powered on, keep the RPM status active. */
+	pm_runtime_put_noidle(&ts->client->dev);
+	pm_runtime_disable(&ts->client->dev);
+	pm_runtime_dont_use_autosuspend(&ts->client->dev);
+
+	return error;
 }
 
 /**
@@ -1308,6 +1410,7 @@ static void goodix_disable_regulators(void *arg)
 
 static int goodix_ts_probe(struct i2c_client *client)
 {
+	struct device_node *np = client->dev.of_node;
 	struct goodix_ts_data *ts;
 	const char *cfg_name;
 	int error;
@@ -1323,10 +1426,12 @@ static int goodix_ts_probe(struct i2c_client *client)
 	if (!ts)
 		return -ENOMEM;
 
+	ts->use_dt_irqflags = of_property_read_bool(np, "use-dt-irq-flags");
 	ts->client = client;
 	i2c_set_clientdata(client, ts);
 	init_completion(&ts->firmware_loading_complete);
 	ts->contact_size = GOODIX_CONTACT_SIZE;
+	ts->poweroff_in_suspend = of_property_read_bool(np, "poweroff-in-suspend");
 
 	error = goodix_get_gpio_config(ts);
 	if (error)
@@ -1397,9 +1502,10 @@ reset:
 			snprintf(ts->cfg_name, sizeof(ts->cfg_name),
 				 "goodix_%s_cfg.bin", ts->id);
 
-		error = request_firmware_nowait(THIS_MODULE, true, ts->cfg_name,
-						&client->dev, GFP_KERNEL, ts,
-						goodix_config_cb);
+		error = firmware_request_nowait_nowarn(THIS_MODULE,
+						       ts->cfg_name,
+						       &client->dev, GFP_KERNEL,
+						       ts, goodix_config_cb);
 		if (error) {
 			dev_err(&client->dev,
 				"Failed to invoke firmware loader: %d\n",
@@ -1421,8 +1527,18 @@ static void goodix_ts_remove(struct i2c_client *client)
 {
 	struct goodix_ts_data *ts = i2c_get_clientdata(client);
 
+	/*
+	 * Resume the device if it is runtime suspended, so that the devm
+	 * cleanups (irq, regulators) run with the device powered on, then
+	 * disable runtime power management.
+	 */
+	pm_runtime_get_sync(&client->dev);
+	pm_runtime_disable(&client->dev);
+
 	if (ts->load_cfg_from_disk)
 		wait_for_completion(&ts->firmware_loading_complete);
+
+        debugfs_remove(ts->debug_root);
 }
 
 static int goodix_suspend(struct device *dev)
@@ -1433,6 +1549,15 @@ static int goodix_suspend(struct device *dev)
 
 	if (ts->load_cfg_from_disk)
 		wait_for_completion(&ts->firmware_loading_complete);
+
+	if (ts->poweroff_in_suspend) {
+		goodix_free_irq(ts);
+		goodix_irq_direction_output(ts, 0);
+		gpiod_direction_output(ts->gpiod_rst, 0);
+		regulator_disable(ts->avdd28);
+		regulator_disable(ts->vddio);
+		return 0;
+	}
 
 	/* We need gpio pins to suspend/resume */
 	if (ts->irq_pin_access_method == IRQ_PIN_ACCESS_NONE) {
@@ -1479,6 +1604,33 @@ static int goodix_resume(struct device *dev)
 	u8 config_ver;
 	int error;
 
+	if (ts->poweroff_in_suspend) {
+		error = regulator_enable(ts->avdd28);
+		if (error) {
+			dev_err(dev, "Regulator avdd28 enable failed.\n");
+			return error;
+		}
+
+		error = regulator_enable(ts->vddio);
+		if (error) {
+			regulator_disable(ts->avdd28);
+			dev_err(dev, "Regulator vddio enable failed.\n");
+			return error;
+		}
+
+		error = goodix_reset(ts);
+		if (error) {
+			dev_err(dev, "Controller reset failed.\n");
+			return error;
+		}
+
+		error = goodix_request_irq(ts);
+		if (error)
+			return error;
+
+		return 0;
+	}
+
 	if (ts->irq_pin_access_method == IRQ_PIN_ACCESS_NONE) {
 		goodix_enable_irq(ts);
 		return 0;
@@ -1521,7 +1673,7 @@ static int goodix_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(goodix_pm_ops, goodix_suspend, goodix_resume);
+static DEFINE_RUNTIME_DEV_PM_OPS(goodix_pm_ops, goodix_suspend, goodix_resume, NULL);
 
 static const struct i2c_device_id goodix_ts_id[] = {
 	{ .name = "GDIX1001:00" },
@@ -1569,7 +1721,7 @@ static struct i2c_driver goodix_ts_driver = {
 		.name = "Goodix-TS",
 		.acpi_match_table = ACPI_PTR(goodix_acpi_match),
 		.of_match_table = of_match_ptr(goodix_of_match),
-		.pm = pm_sleep_ptr(&goodix_pm_ops),
+		.pm = pm_ptr(&goodix_pm_ops),
 	},
 };
 module_i2c_driver(goodix_ts_driver);
