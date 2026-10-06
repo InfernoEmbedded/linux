@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config ALLWINNER_VIPCORE
+	tristate "Allwinner VIP9000 NPU Core Driver"
+	depends on ARCH_SUNXI
+	help
+	  Enable support for the VeriSilicon VIP9000 Neural Processing Unit (NPU)
+	  found in Allwinner A733 / sun60iw2 SoCs.
