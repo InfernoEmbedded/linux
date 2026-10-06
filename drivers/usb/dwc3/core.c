@@ -16,7 +16,6 @@
 #include <linux/spinlock.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
-#include <linux/arm-smccc.h>
 #include <linux/io.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -2289,17 +2288,15 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 
 	/* Allwinner A733 DWC3 & SerDes Subsystem un-gate hook */
 	if (of_machine_is_compatible("allwinner,sun60i-a733")) {
-		struct arm_smccc_res res;
 		void __iomem *ccu_base, *subsys_base;
 		u32 val;
 
-		/* 1. SMC EL3 security permissions */
-		arm_smccc_smc(0xC000FF06, 0x02003F00, 0x00000007, 0, 0, 0, 0, 0, &res);
-		arm_smccc_smc(0xC000FF06, 0x02003b30, 0x00000001, 0, 0, 0, 0, 0, &res);
-
-		/* 2. CCU Clocks & Resets (base 0x02002000) */
+		/* 1. CCU Clocks & Resets (base 0x02002000) */
 		ccu_base = ioremap(0x02002000, 0x2000);
 		if (ccu_base) {
+			/* USB Reset / Clock Gate @ 0x1B30 */
+			writel(0x00000001, ccu_base + 0x1b30);
+
 			/* AHB Master Gate @ 0x5C0: Enable SerDes (bit 8) and USB (bit 9) */
 			val = readl(ccu_base + 0x05c0);
 			writel(val | BIT(8) | BIT(9), ccu_base + 0x05c0);
@@ -2324,7 +2321,7 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 			iounmap(ccu_base);
 		}
 
-		/* 3. Subsystem Bus Gating & Routing */
+		/* 2. Subsystem Bus Gating & Routing */
 		subsys_base = ioremap(0x06C00000, 0x1000);
 		if (subsys_base) {
 			writel(0x00330033, subsys_base + 0x0008); /* SUBSYS_USB3P1_BGR: ungate USB3.1 clocks and deassert bus resets */

@@ -57,21 +57,6 @@
 
 #include <linux/devfreq_cooling.h>
 #include <linux/pm_opp.h>
-#include <linux/arm-smccc.h>
-
-static int sunxi_smc_writel(u32 reg, u32 val)
-{
-	struct arm_smccc_res res;
-	arm_smccc_smc(0xC000FF06, reg, val, 0, 0, 0, 0, 0, &res);
-	return (int)res.a0;
-}
-
-static u32 sunxi_smc_readl(u32 reg)
-{
-	struct arm_smccc_res res;
-	arm_smccc_smc(0xC000FF05, reg, 0, 0, 0, 0, 0, 0, &res);
-	return (u32)res.a0;
-}
 
 #if NPU_USER_IOMMU
 #include <linux/dma-mapping.h>
@@ -351,30 +336,18 @@ static vip_status_e npu_clk_init(void)
 	 */
 	ccu_base = ioremap(0x02002000, 0x2000);
 	if (ccu_base) {
-		int spc_i;
-
-		/* 3. Un-gate Secure EL3 Registers via SMC fastcall */
-		sunxi_smc_writel(0x02003F00, 0x00000007); /* CCMU_SEC_SWITCH_REG: non-secure MBUS, BUS, PLL unlock */
-		sunxi_smc_writel(0x03900030, 0xFFFFFFFF); /* IOMMU0 AUTO_BYPASS */
-		sunxi_smc_writel(0x03910030, 0xFFFFFFFF); /* IOMMU1 AUTO_BYPASS */
-		for (spc_i = 0; spc_i < 24; spc_i++) {
-			sunxi_smc_writel(0x02054000 + spc_i * 4, 0xFFFFFFFF); /* SPC master ports non-secure read/write permitted */
-		}
-		sunxi_smc_writel(0x020025E4, 0xFFFFFFFF); /* MBUS_GATE_EN */
-		sunxi_smc_writel(0x020025C0, 0xFFFFFFFF); /* AHB_MAT_CLK_GATING */
-		sunxi_smc_writel(0x020025E0, 0xFFFFFFFF); /* MBUS_MAT_CLK_GATING */
-
-		/* Interconnect clocks via SMC / CCU */
-		sunxi_smc_writel(0x02002570, 0x00010001);
-		sunxi_smc_writel(0x02002574, 0x00010002);
-		sunxi_smc_writel(0x02002580, 0xC3000000);
-		sunxi_smc_writel(0x02002584, 0x00010001);
-		sunxi_smc_writel(0x02002588, 0x81000000);
-		sunxi_smc_writel(0x02002594, 0x00030001);
-		sunxi_smc_writel(0x0200259C, 0x00030001);
-		sunxi_smc_writel(0x020025A4, 0x00030001);
-		sunxi_smc_writel(0x0200258C, 0x00010007);
-		sunxi_smc_writel(0x020025B4, 0x00010007);
+		/* 3. MBUS and Interconnect clocks via CCU */
+		writel(0xFFFFFFFF, ccu_base + 0x05E4); /* MBUS_GATE_EN */
+		writel(0x00010001, ccu_base + 0x0570);
+		writel(0x00010002, ccu_base + 0x0574);
+		writel(0xC3000000, ccu_base + 0x0580);
+		writel(0x00010001, ccu_base + 0x0584);
+		writel(0x81000000, ccu_base + 0x0588);
+		writel(0x00030001, ccu_base + 0x0594);
+		writel(0x00030001, ccu_base + 0x059C);
+		writel(0x00030001, ccu_base + 0x05A4);
+		writel(0x00010007, ccu_base + 0x058C);
+		writel(0x00010007, ccu_base + 0x05B4);
 
 		peri0 = readl(ccu_base + 0x00A0);
 		peri0 |= BIT(31) | BIT(30) | BIT(29) | BIT(27) | BIT(26) | BIT(25);
@@ -391,15 +364,12 @@ static vip_status_e npu_clk_init(void)
 		writel(0x000F0001, ccu_base + 0x0B04);
 		writel(0x00020001, ccu_base + 0x1B1C);
 
-		PRINTK("vipcore: CCU & SMC initialized: PLL_PERI0=0x%08x NPU_CLK=0x%08x NPU_BGR=0x%08x CM_NPU=0x%08x CCMU_SEC=0x%08x IOMMU0=0x%08x SPC0=0x%08x MBUS_GATE=0x%08x\n",
+		PRINTK("vipcore: CCU initialized: PLL_PERI0=0x%08x NPU_CLK=0x%08x NPU_BGR=0x%08x CM_NPU=0x%08x MBUS_GATE=0x%08x\n",
 			readl(ccu_base + 0x00A0),
 			readl(ccu_base + 0x0B00),
 			readl(ccu_base + 0x0B04),
 			readl(ccu_base + 0x1B1C),
-			sunxi_smc_readl(0x02003F00),
-			sunxi_smc_readl(0x03900030),
-			sunxi_smc_readl(0x02054000),
-			sunxi_smc_readl(0x020025E4));
+			readl(ccu_base + 0x05E4));
 
 		iounmap(ccu_base);
 	} else {

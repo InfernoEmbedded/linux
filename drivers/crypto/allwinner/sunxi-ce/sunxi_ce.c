@@ -32,24 +32,10 @@
 #include <linux/dmaengine.h>
 #include <linux/dma-mapping.h>
 #include <linux/reset.h>
-#include <linux/arm-smccc.h>
 #include <linux/delay.h>
+#include <linux/io.h>
 #include "sunxi_ce_cdev.h"
 #include "sunxi_ce_proc.h"
-
-static inline int sunxi_smc_writel(u32 reg, u32 val)
-{
-	struct arm_smccc_res res;
-	arm_smccc_smc(0xC000FF06, reg, val, 0, 0, 0, 0, 0, &res);
-	return (int)res.a0;
-}
-
-static inline u32 sunxi_smc_readl(u32 reg)
-{
-	struct arm_smccc_res res;
-	arm_smccc_smc(0xC000FF05, reg, 0, 0, 0, 0, 0, 0, &res);
-	return (u32)res.a0;
-}
 
 static void sunxi_ce_ccu_reset_pulse(void)
 {
@@ -62,6 +48,17 @@ static void sunxi_ce_ccu_reset_pulse(void)
 		udelay(20);
 		iounmap(ccu_ce_bgr);
 	}
+}
+
+static void sunxi_ce_ccu_init(void)
+{
+	void __iomem *ccu_mbus = ioremap(0x020025E4, 4);
+	if (ccu_mbus) {
+		/* Enable CE in MBUS gate (0x020025E4) */
+		writel(readl(ccu_mbus) | BIT(2), ccu_mbus);
+		iounmap(ccu_mbus);
+	}
+	sunxi_ce_ccu_reset_pulse();
 }
 #ifdef SS_SUPPORT_CE_V5
 #include "v5/sunxi_ce_reg.h"
@@ -1133,7 +1130,6 @@ static int sunxi_get_ce_clk(sunxi_ce_cdev_t *sss)
 static int sunxi_ss_hw_init(sunxi_ce_cdev_t *sss)
 {
 	struct device_node *pnode = sss->pdev->dev.of_node;
-	int spc_i;
 
 	if (sunxi_get_ce_clk(sss) != 0) {
 		return -EINVAL;
@@ -1188,14 +1184,6 @@ static int sunxi_ss_hw_init(sunxi_ce_cdev_t *sss)
 			SS_ERR("Couldn't enable trng clk\n");
 	}
 
-	/* Un-gate Secure EL3 Registers via SMC fastcall */
-	sunxi_smc_writel(0x02003F00, 0x00000007); /* CCMU_SEC_SWITCH_REG: non-secure MBUS, BUS, PLL unlock */
-	sunxi_smc_writel(0x03900030, 0xFFFFFFFF); /* IOMMU0 AUTO_BYPASS */
-	sunxi_smc_writel(0x03910030, 0xFFFFFFFF); /* IOMMU1 AUTO_BYPASS */
-	for (spc_i = 0; spc_i < 24; spc_i++)
-		sunxi_smc_writel(0x02054000 + spc_i * 4, 0xFFFFFFFF); /* SPC master ports non-secure read/write permitted */
-	sunxi_smc_writel(0x020025E4, sunxi_smc_readl(0x020025E4) | BIT(2));
-
 	/* Pulse CE reset now that clocks are active to clear any stale hardware/U-Boot error states */
 	if (!IS_ERR_OR_NULL(sss->reset)) {
 		reset_control_assert(sss->reset);
@@ -1203,16 +1191,13 @@ static int sunxi_ss_hw_init(sunxi_ce_cdev_t *sss)
 		reset_control_deassert(sss->reset);
 		udelay(20);
 	}
-	sunxi_ce_ccu_reset_pulse();
+	sunxi_ce_ccu_init();
 
 #ifdef CE_DBL_ENT_SRC_EN
 	/* TRNG double entropy should be enabled when ce is enabled */
 	ss_trng_dbl_ent_en();
 #endif
 
-	SS_DBG("[CE_INIT] MBUS_GATE_EN (0x020025E4) = 0x%08x\n", sunxi_smc_readl(0x020025E4));
-	SS_DBG("[CE_INIT] CE_CLK (0x02002AC0) = 0x%08x, CE_BGR (0x02002AC4) = 0x%08x\n",
-	       sunxi_smc_readl(0x02002AC0), sunxi_smc_readl(0x02002AC4));
 	SS_DBG("[CE_INIT] CE_ESR = 0x%08x, CE_TSR = 0x%08x\n", ss_reg_rd(CE_REG_ERR), ss_reg_rd(CE_REG_TSR));
 
 	/* Clear any pending interrupts left by bootloader/earlier operations */
